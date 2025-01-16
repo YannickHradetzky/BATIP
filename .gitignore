@@ -186,3 +186,9 @@ Supernova_project/sbi-logs/
 Supernova_project/sbi-logs/*
 Supernova_project/sbi-logs/*/*.DS_Store
 .DS_Store
+
+# Supernova_project/sbi-logs/
+# Supernova_project/sbi-logs/*
+# Supernova_project/sbi-logs/*/*.DS_Store
+# .DS_Store
+
