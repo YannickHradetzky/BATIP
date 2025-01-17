@@ -34,8 +34,8 @@ class Config:
     EPSILON = 1e-10
     
     # Paths
-    DATA_PATH = '/Users/yhra/Documents/Master/Semester_3/BATIP/Supernova_project/Data/'
-    PLOT_PATH = '/Users/yhra/Documents/Master/Semester_3/BATIP/Supernova_project/Plots/'
+    DATA_PATH = '/Users/Maxi/Desktop/Uni/Master/Cosmos/BATIP/Supernova_project/Data/'
+    PLOT_PATH = '/Users/Maxi/Desktop/Uni/Master/Cosmos/BATIP/Supernova_project/Plots'
 
 # Set up JAX and NumPyro
 jax.config.update('jax_platform_name', 'cpu')
@@ -276,6 +276,17 @@ class CosmologyInference:
 
         print(f"Plot saved to {Config.PLOT_PATH}{model_type}_distance_modulus.png")
 
+    def Autocorrelation(self, samples, debug = False):
+        """Calculate the autocorrelation of the samples for each parameter"""
+        thin_samples = {}
+        for param, values in samples.items():
+            autocorr = numpyro.diagnostics.autocorrelation(values)
+            autocorr_length = int(len(autocorr) / (1 + 2 * np.sum(autocorr)))
+            thin_samples[param] = values[::autocorr_length]
+            if debug:
+                print(f"Autocorrelation length for {param}: {autocorr_length}, with {len(values)} samples, resulting in {len(thin_samples[param])} samples")
+        return thin_samples
+    
 # Example usage
 if __name__ == "__main__":
     # Initialize the inference object
@@ -284,13 +295,15 @@ if __name__ == "__main__":
     # Run flat model
     print("Running flat ΛCDM model...")
     flat_samples = cosmo.run_inference(model_type="flat")
-    cosmo.plot_samples(flat_samples, model_type="flat")
+    # Test for autocorrelation and discard correlated samples
+    thin_flat_samples = cosmo.Autocorrelation(flat_samples, debug = True)
+    cosmo.plot_samples(thin_flat_samples, model_type="flat")
     
     # Run curved model
-    print("\nRunning curved ΛCDM model...")
-    curved_samples = cosmo.run_inference(model_type="curved")
-    cosmo.plot_samples(curved_samples, model_type="curved") 
+    #print("\nRunning curved ΛCDM model...")
+    #curved_samples = cosmo.run_inference(model_type="curved")
+    #cosmo.plot_samples(curved_samples, model_type="curved") 
     
     # Test model
-    cosmo.test_model(model_type="flat")
-    cosmo.test_model(model_type="curved")
+    #cosmo.test_model(model_type="flat")
+    #cosmo.test_model(model_type="curved")
