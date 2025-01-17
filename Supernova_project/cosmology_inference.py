@@ -1,3 +1,4 @@
+import numpyro.infer.initialization
 import pandas as pd
 import numpyro
 import numpy as np
@@ -8,7 +9,7 @@ import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS
 from numpyro import sample
 import matplotlib.pyplot as plt
-
+import corner
 # Configuration
 class Config:
     # MCMC settings
@@ -16,13 +17,12 @@ class Config:
     NUM_SAMPLES = 5000
     NUM_CHAINS = 4
     TARGET_ACCEPT_PROB = 0.8
-    MAX_TREE_DEPTH = 5
+    MAX_TREE_DEPTH = 8
     
     # Priors
-    H0_PRIOR = (60.0, 80.0)  # Uniform prior range for H0
-    OM_PRIOR = (0.0, 0.9)    # Uniform prior range for Omega_m
-    OK_PRIOR_MEAN = 0.0      # Mean for Ok normal prior
-    OK_PRIOR_STD = 0.2       # Std for Ok normal prior
+    H0_PRIOR = dist.Normal(70, 5)
+    OM_PRIOR = dist.Normal(0.3, 0.1)
+    OK_PRIOR = dist.Normal(0, 0.1)
     
     # Data filtering
     MIN_REDSHIFT = 0.001
@@ -89,58 +89,79 @@ class CosmologyInference:
         return cov_matrix
     
     @staticmethod
-    def hubble_z(H0, Om, Ok, z, flat=True):
+    def hubble_z(H0, Om, Ok, z):
         """Hubble parameter at redshift z"""
         matter_term = Om * (1 + z)**3
-        if flat:
-            lambda_term = (1 - Om)
-        else:
-            lambda_term = (1 - Om - Ok)
-            curvature_term = Ok * (1 + z)**2
-            return H0 * jnp.sqrt(matter_term + lambda_term + curvature_term)
-        return H0 * jnp.sqrt(matter_term + lambda_term)
+        lambda_term = jnp.where(jnp.abs(Ok) < Config.EPSILON,
+                              1 - Om,  # flat universe case
+                              1 - Om - Ok)  # curved universe case
+        
+        curvature_term = Ok * (1 + z)**2
+        return H0 * jnp.sqrt(matter_term + lambda_term + jnp.where(jnp.abs(Ok) < Config.EPSILON, 0.0, curvature_term))
     
-    def chi(self, h0, Om, Ok, z, flat=True):
+    def chi(self, h0, Om, Ok, z):
         """Comoving distance"""
         N = 1000
         z_max = jnp.max(z)
-        z_array = jnp.linspace(0.001, z_max, N)
+        z_min = jnp.min(z)
+        z_array = jnp.linspace(z_min, z_max, N)
         dz = jnp.diff(z_array, append=z_array[-1])
         
-        integrand_values = Config.C / self.hubble_z(h0, Om, Ok, z_array, flat)
+        integrand_values = Config.C / self.hubble_z(h0, Om, Ok, z_array)
         return jax.vmap(lambda z_point: jnp.sum(integrand_values * dz * (z_array <= z_point)))(z)
     
-    def luminosity_distance(self, H0, Om, Ok, z, flat=True):
-        """Luminosity distance"""
-        # TODO: curvature correction!!!
-        chi_val = self.chi(H0, Om, Ok, z, flat)
-        return (1 + z) * chi_val
-    
-    def distance_modulus(self, H0, Om, Ok, z, flat=True):
+    def r_exact(self, Ok, chi):
+        """Exact radial distance function"""
+        # Flat universe (Ok = 0)
+        flat_case = chi
+        # Open universe (Ok > 0)
+        open_case = 1/jnp.sqrt(Ok + Config.EPSILON) * jnp.sinh(jnp.sqrt(Ok + Config.EPSILON) * chi)
+        # Closed universe (Ok < 0)
+        closed_case = 1/jnp.sqrt(jnp.abs(Ok) + Config.EPSILON) * jnp.sin(jnp.sqrt(jnp.abs(Ok)) * chi)
+        
+        return jnp.where(Ok == 0, flat_case,
+                        jnp.where(Ok > 0, open_case, closed_case))
+
+    def r_taylor(self, Ok, chi):
+        """Taylor expansion of radial distance around Ok = 0 and differentiate between positive and negative Ok"""      
+        def positive_ok(Ok, chi):
+            return chi/jnp.sqrt(Ok + Config.EPSILON) + (chi**3)/6 * jnp.sqrt(Ok + Config.EPSILON) + 1/120 * (chi**5) * jnp.sqrt(Ok + Config.EPSILON)**3
+        def negative_ok(Ok, chi):
+            return chi/jnp.sqrt(-Ok + Config.EPSILON) - (chi**3)/6 * jnp.sqrt(-Ok + Config.EPSILON) + 1/120 * (chi**5) * jnp.sqrt(-Ok + Config.EPSILON)**3
+        result = jnp.where(Ok > 0, positive_ok(Ok, chi), negative_ok(Ok, chi))
+        return result
+
+    def luminosity_distance(self, H0, Om, Ok, z):
+        """Luminosity distance using Taylor expansion around Ok = 0"""
+        chi_val = self.chi(H0, Om, Ok, z)
+        r_z = jnp.where(jnp.abs(Ok) < Config.EPSILON, chi_val, self.r_taylor(Ok, chi_val))
+        return r_z * (1 + z)
+
+    def distance_modulus(self, H0, Om, Ok, z):
         """Distance modulus"""
-        d_L = self.luminosity_distance(H0, Om, Ok, z, flat)
+        d_L = self.luminosity_distance(H0, Om, Ok, z)
         return 5 * jnp.log10(d_L + Config.EPSILON) + 25
     
     def model_flat(self, z, mu_obs, mu_err):
         """Flat ΛCDM model"""
-        H0 = sample("H0", dist.Uniform(*Config.H0_PRIOR))
-        Om = sample("Om", dist.Uniform(*Config.OM_PRIOR))
+        H0 = sample("H0", Config.H0_PRIOR)
+        Om = sample("Om", Config.OM_PRIOR)
         Ok = 0.0
         
         likelihood = dist.MultivariateNormal(
-            self.distance_modulus(H0, Om, Ok, z, flat=True), 
+            self.distance_modulus(H0, Om, Ok, z), 
             self.sys_stat_cov_matrix
         )
         sample("obs", likelihood, obs=mu_obs)
     
     def model_curved(self, z, mu_obs, mu_err):
         """Curved ΛCDM model"""
-        H0 = sample("H0", dist.Uniform(*Config.H0_PRIOR))
-        Om = sample("Om", dist.Uniform(*Config.OM_PRIOR))
-        Ok = sample("Ok", dist.Normal(Config.OK_PRIOR_MEAN, Config.OK_PRIOR_STD))
+        H0 = sample("H0", Config.H0_PRIOR)
+        Om = sample("Om", Config.OM_PRIOR)
+        Ok = sample("Ok", Config.OK_PRIOR)
         
         likelihood = dist.MultivariateNormal(
-            self.distance_modulus(H0, Om, Ok, z, flat=False), 
+            self.distance_modulus(H0, Om, Ok, z), 
             self.sys_stat_cov_matrix
         )
         sample("obs", likelihood, obs=mu_obs)
@@ -148,17 +169,18 @@ class CosmologyInference:
     def run_inference(self, model_type="flat"):
         """Run MCMC inference"""
         model = self.model_flat if model_type == "flat" else self.model_curved
-        
         kernel = NUTS(model, 
                      target_accept_prob=Config.TARGET_ACCEPT_PROB,
-                     max_tree_depth=Config.MAX_TREE_DEPTH)
+                     max_tree_depth=Config.MAX_TREE_DEPTH
+        )
         
         mcmc = MCMC(kernel, 
                     num_warmup=Config.NUM_WARMUP,
                     num_samples=Config.NUM_SAMPLES,
                     num_chains=Config.NUM_CHAINS,
                     chain_method='parallel',
-                    progress_bar=True)
+                    progress_bar=True
+        )
         
         rng_key = random.PRNGKey(0)
         mcmc.run(rng_key, z=self.z, mu_obs=self.mu_obs, mu_err=self.mu_err)
@@ -204,6 +226,56 @@ class CosmologyInference:
         plt.savefig(f'{Config.PLOT_PATH}{model_type}_posteriors.png')
         plt.close()
 
+    def test_model(self, model_type="flat"):
+        """Test model"""
+        # draw 10000 samples from the prior
+        Om_prior = Config.OM_PRIOR
+        Om = np.array(Om_prior.sample(random.PRNGKey(0), (10000,)))
+        H0_prior = Config.H0_PRIOR
+        H0 = np.array(H0_prior.sample(random.PRNGKey(0), (10000,)))
+        if model_type == "curved":
+            Ok_prior = Config.OK_PRIOR
+            Ok = np.array(Ok_prior.sample(random.PRNGKey(0), (10000,)))
+        else:
+            Ok = np.zeros(10000)
+        
+        # Define ranges for the corner plot
+        ranges = [
+            (50, 80),     # H0 range
+            (0.1, 0.5),   # Om range
+            (-0.03, 0.03) # Ok range
+        ]
+        
+        # make a corner plot
+        fig = corner.corner(
+            np.stack([H0, Om, Ok], axis=-1), 
+            labels=['H0', 'Om', 'Ok'],
+            range=ranges,
+            plot_datapoints=False,
+            plot_density=False,
+            plot_contours=True,
+            fill_contours=True,
+            levels=[0.68, 0.95, 0.997],
+            plot_contours_kwargs={'colors': ['red', 'green', 'blue']}
+        )
+        plt.savefig(f'{Config.PLOT_PATH}{model_type}_corner_plot.png')
+        plt.close()
+
+        # plot the distance modulus for each combination
+        plt.figure(figsize=(10, 8))
+        plt.title('Distance Modulus')
+        plt.xlabel('Redshift')
+        plt.ylabel('Distance Modulus')
+        plt.grid(True)
+
+        for (Om,Ho,Ok) in zip(Om, H0, Ok):
+            mu = self.distance_modulus(Ho, Om, Ok, self.z)
+            plt.plot(self.z, mu, label=f'H0={Ho}, Om={Om}, Ok={Ok}')
+        plt.savefig(f'{Config.PLOT_PATH}{model_type}_distance_modulus.png')
+        plt.close()
+
+        print(f"Plot saved to {Config.PLOT_PATH}{model_type}_distance_modulus.png")
+
 # Example usage
 if __name__ == "__main__":
     # Initialize the inference object
@@ -218,3 +290,7 @@ if __name__ == "__main__":
     print("\nRunning curved ΛCDM model...")
     curved_samples = cosmo.run_inference(model_type="curved")
     cosmo.plot_samples(curved_samples, model_type="curved") 
+    
+    # Test model
+    cosmo.test_model(model_type="flat")
+    cosmo.test_model(model_type="curved")
