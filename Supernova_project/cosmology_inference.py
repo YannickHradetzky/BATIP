@@ -8,7 +8,7 @@ import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS
 from numpyro import sample
 import matplotlib.pyplot as plt
-#jo
+
 # Configuration
 class Config:
     # MCMC settings
