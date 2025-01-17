@@ -279,13 +279,19 @@ class CosmologyInference:
     def Autocorrelation(self, samples, debug = False):
         """Calculate the autocorrelation of the samples for each parameter"""
         thin_samples = {}
+        autocorr = {}
+        autocorr_length = {}
         for param, values in samples.items():
-            autocorr = numpyro.diagnostics.autocorrelation(values)
-            autocorr_length = int(len(autocorr) / (1 + 2 * np.sum(autocorr)))
-            thin_samples[param] = values[::autocorr_length]
+            autocorr[param] = numpyro.diagnostics.autocorrelation(values)
+            # Calculate the autocorrelation length, excluding the zero-lag autocorrelation
+            autocorr_length[param] = 1 + 2 * np.sum(autocorr[param][1:])
+            if autocorr_length[param] <= 0:
+                raise ValueError(f"Calculated negative or zero autocorrelation length for {param}: {autocorr_length[param]}")
+            thin_samples[param] = values[::int(autocorr_length[param])]
             if debug:
-                print(f"Autocorrelation length for {param}: {autocorr_length}, with {len(values)} samples, resulting in {len(thin_samples[param])} samples")
+                print(f"Autocorrelation length for {param}: {autocorr_length[param]}, with {len(values)} samples, resulting in {len(thin_samples[param])} samples")
         return thin_samples
+
     
 # Example usage
 if __name__ == "__main__":
@@ -295,9 +301,10 @@ if __name__ == "__main__":
     # Run flat model
     print("Running flat ΛCDM model...")
     flat_samples = cosmo.run_inference(model_type="flat")
+    
     # Test for autocorrelation and discard correlated samples
     thin_flat_samples = cosmo.Autocorrelation(flat_samples, debug = True)
-    cosmo.plot_samples(thin_flat_samples, model_type="flat")
+    cosmo.plot_samples(flat_samples, model_type="flat")
     
     # Run curved model
     #print("\nRunning curved ΛCDM model...")
