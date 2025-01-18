@@ -599,7 +599,148 @@ def plot_scientific_results(samples_flat=None, samples_curved=None, data_type="r
             plt.savefig(f'{SBIConfig.PLOT_PATH}sbi_{model_type}_corner_plot.png', dpi=300, bbox_inches='tight')
         plt.close()
 
-
+def plot_model_comparison(samples_flat, samples_curved, data_type="real"):
+    """Create comparison plots between flat and curved models"""
+    # Convert tensors to numpy arrays if needed
+    if torch.is_tensor(samples_flat):
+        samples_flat = samples_flat.numpy()
+    if torch.is_tensor(samples_curved):
+        samples_curved = samples_curved.numpy()
+    
+    # Calculate Omega_lambda for both models
+    omega_l_flat = 1 - samples_flat[:, 1]
+    omega_l_curved = 1 - samples_curved[:, 1] - samples_curved[:, 2]
+    
+    # Create figure for parameter distributions
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    
+    # Adjust the spacing between plots and title
+    plt.subplots_adjust(top=0.85)  # Increase space for title
+    
+    fig.suptitle('Comparison of Flat and Curved ΛCDM Models' + 
+                (" (Simulated Data)" if data_type=="fake" else ""),
+                fontsize=16, y=0.98)  # Move title higher
+    
+    ranges = [
+        (65, 75),      # H₀ range
+        (0.1, 0.5),    # Ωₘ range
+        (-0.2, 0.2)    # Ωₖ range
+    ]
+    
+    # Common plot settings
+    plt.rcParams.update({
+        'font.size': 12,
+        'axes.labelsize': 14,
+        'axes.titlesize': 14,
+        'xtick.labelsize': 12,
+        'ytick.labelsize': 12,
+        'legend.fontsize': 12
+    })
+    
+    # H0 distribution comparison
+    axes[0,0].hist(samples_flat[:, 0], bins=50, alpha=0.5, color='skyblue', 
+                   label='Flat', density=True)
+    axes[0,0].hist(samples_curved[:, 0], bins=50, alpha=0.5, color='salmon', 
+                   label='Curved', density=True)
+    axes[0,0].set_title('Hubble Parameter Distribution')
+    axes[0,0].set_xlabel('H₀ [km/s/Mpc]')
+    axes[0,0].set_ylabel('Density')
+    axes[0,0].legend()
+    
+    # Omega_m distribution comparison
+    axes[0,1].hist(samples_flat[:, 1], bins=50, alpha=0.5, color='skyblue', 
+                   label='Flat', density=True)
+    axes[0,1].hist(samples_curved[:, 1], bins=50, alpha=0.5, color='salmon', 
+                   label='Curved', density=True)
+    axes[0,1].set_title('Matter Density Distribution')
+    axes[0,1].set_xlabel('Ωₘ')
+    axes[0,1].set_ylabel('Density')
+    axes[0,1].legend()
+    
+    # Omega_lambda distribution comparison
+    axes[1,0].hist(omega_l_flat, bins=50, alpha=0.5, color='skyblue', 
+                   label='Flat', density=True)
+    axes[1,0].hist(omega_l_curved, bins=50, alpha=0.5, color='salmon', 
+                   label='Curved', density=True)
+    axes[1,0].set_title('Dark Energy Density Distribution')
+    axes[1,0].set_xlabel('Ωₗ')
+    axes[1,0].set_ylabel('Density')
+    axes[1,0].legend()
+    
+    # Omega_k distribution (curved model only)
+    axes[1,1].hist(samples_curved[:, 2], bins=50, color='salmon', 
+                   label='Curved', density=True)
+    axes[1,1].set_title('Curvature Density Distribution')
+    axes[1,1].set_xlabel('Ωₖ')
+    axes[1,1].set_ylabel('Density')
+    axes[1,1].legend()
+    
+    plt.tight_layout()
+    if data_type == "fake":
+        plt.savefig(f'{SBIConfig.PLOT_PATH}sbi_model_comparison_posteriors_fake.png', 
+                   dpi=300, bbox_inches='tight')
+    else:
+        plt.savefig(f'{SBIConfig.PLOT_PATH}sbi_model_comparison_posteriors.png', 
+                   dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Create combined corner plot
+    # First, create comparable arrays by adding a zero curvature column to flat model
+    flat_samples_extended = np.column_stack([
+        samples_flat, 
+        np.zeros(len(samples_flat))  # Add Ok=0 column for flat model
+    ])
+    
+    # Create figure
+    fig = plt.figure(figsize=(12, 12))
+    plt.subplots_adjust(top=0.85)  # Increase space for title
+    
+    # Plot both models in the same corner plot with different colors
+    corner.corner(
+        flat_samples_extended,
+        labels=['H₀', 'Ωₘ', 'Ωₖ'],
+        color='skyblue',
+        plot_datapoints=False,
+        plot_density=False,
+        contours=True,
+        fill_contours=True,
+        levels=[0.68, 0.95, 0.997],
+        label='Flat',
+        title_kwargs={"fontsize": 16},
+        label_kwargs={"fontsize": 14},
+        range=ranges  # Add parameter ranges
+    )
+    
+    corner.corner(
+        samples_curved,
+        labels=['H₀', 'Ωₘ', 'Ωₖ'],
+        color='salmon',
+        plot_datapoints=False,
+        plot_density=False,
+        contours=True,
+        fill_contours=True,
+        levels=[0.68, 0.95, 0.997],
+        label='Curved',
+        fig=fig,
+        title_kwargs={"fontsize": 16},
+        label_kwargs={"fontsize": 14},
+        range=ranges  # Add parameter ranges
+    )
+    
+    plt.suptitle(
+        'Corner Plot Comparison of Flat and Curved ΛCDM Models' +
+        (" (Simulated Data)" if data_type=="fake" else ""),
+        fontsize=16,
+        y=0.95  # Adjust title position
+    )
+    
+    if data_type == "fake":
+        plt.savefig(f'{SBIConfig.PLOT_PATH}sbi_model_comparison_corner_fake.png', 
+                   dpi=300, bbox_inches='tight')
+    else:
+        plt.savefig(f'{SBIConfig.PLOT_PATH}sbi_model_comparison_corner.png', 
+                   dpi=300, bbox_inches='tight')
+    plt.close()
 
 if __name__ == "__main__":
     set_seed(RANDOM_SEED)  # Set seed at start of main
@@ -632,4 +773,10 @@ if __name__ == "__main__":
     plot_scientific_results(
         samples_flat=samples_dict["flat"],
         samples_curved=samples_dict["curved"],
+    )
+
+    # Create model comparison plots
+    plot_model_comparison(
+        samples_flat=samples_dict["flat"],
+        samples_curved=samples_dict["curved"]
     )

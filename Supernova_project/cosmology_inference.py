@@ -85,7 +85,9 @@ class CosmologyInference:
         plt.colorbar()
         plt.savefig(f'{Config.PLOT_PATH}{title}_cov_matrix.png')
         plt.close()
-        
+
+        # store the covariance matrix as a txt file
+        np.savetxt(f'{Config.DATA_PATH}{title}_cov_matrix.txt', cov_matrix)
         return cov_matrix
     
     @staticmethod
