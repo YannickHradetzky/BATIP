@@ -5,7 +5,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from torch import nn
-from torch.distributions import Independent, Uniform, Normal
+from torch.distributions import Independent, Uniform, Normal, MultivariateNormal
 from sbi import inference as inference
 from sbi.neural_nets.factory import posterior_nn
 from sbi.analysis import pairplot
@@ -23,7 +23,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from torch import nn
-from torch.distributions import Independent, Uniform, Normal
+from torch.distributions import Independent, Uniform, Normal, MultivariateNormal
 from sbi import inference as inference
 from sbi.neural_nets.factory import posterior_nn
 from sbi.analysis import pairplot
@@ -171,9 +171,18 @@ class CosmologicalSimulator:
         
         # Return both z and mu for each simulation
         return torch.stack([self.z.expand(len(params), -1), mu], dim=-1)
+    
+
+def _create_cov_mat(cov_data):
+    n = int(cov_data[0])
+    cov_matrix = cov_data[1:].reshape(n, n)
+    
+    # Make symmetric if needed
+    if not np.allclose(cov_matrix, cov_matrix.T):
+        cov_matrix = (cov_matrix + cov_matrix.T) / 2
+    return cov_matrix
 
 # TODO: torch.distributions for covariance matrix 
-# TODO: corner plot (corner package)
 def apply_curvature_correction(chi, Ok):
     """Apply curvature correction to comoving distance, differentiating between positive and negative Ok
     
@@ -214,8 +223,12 @@ def load_real_data():
     z_obs = torch.as_tensor(z_obs, dtype=torch.float32).clone().detach()
     mu_obs = torch.as_tensor(mu_obs, dtype=torch.float32).clone().detach()
     mu_err = torch.as_tensor(mu_err, dtype=torch.float32).clone().detach()
+
+    # Create covariance matrix
+    cov_data = np.loadtxt(SBIConfig.DATA_PATH + 'Pantheon+SH0ES_STAT+SYS.cov')
+    cov_matrix = _create_cov_mat(cov_data)
     
-    return z_obs, mu_obs, mu_err
+    return z_obs, mu_obs, mu_err, cov_matrix
 
 def plot_training_data(z_obs, mu_obs, mu_err, theta, simulated_data, model_type="flat"):
     """Create visualization of parameter space coverage and model predictions during training"""
@@ -343,12 +356,28 @@ def plot_training_data(z_obs, mu_obs, mu_err, theta, simulated_data, model_type=
     plt.close()
 
 class CosmologySBI:
-    def __init__(self, z_obs, mu_obs, mu_err):
-        """Initialize the SBI trainer with observed data"""
+    def __init__(self, z_obs, mu_obs, mu_err, cov_matrix=None):
+        """Initialize the SBI trainer with observed data and covariance matrix"""
         set_seed(SBIConfig.RANDOM_SEED)  # Set seed in constructor
         self.z_obs = z_obs
         self.mu_obs = mu_obs
         self.mu_err = mu_err
+        
+        # Convert covariance matrix to torch tensor if provided
+        if cov_matrix is not None:
+            self.cov_matrix = torch.tensor(cov_matrix, dtype=torch.float32)
+            # Create likelihood distribution
+            self.likelihood = MultivariateNormal(
+                loc=self.mu_obs,
+                covariance_matrix=self.cov_matrix
+            )
+        else:
+            # Fallback to diagonal covariance matrix using mu_err
+            self.cov_matrix = torch.diag(self.mu_err**2)
+            self.likelihood = MultivariateNormal(
+                loc=self.mu_obs,
+                covariance_matrix=self.cov_matrix
+            )
         
         # Setup simulator with default flat model
         self.simulator = CosmologicalSimulator(z_obs)
@@ -389,7 +418,7 @@ class CosmologySBI:
         )
     
     def train(self):
-        """Train the neural network"""
+        """Train the neural network with covariance-aware likelihood"""
         set_seed(SBIConfig.RANDOM_SEED)  # Set seed before training
         # Setup prior based on current model type
         self.setup_prior()
@@ -397,8 +426,12 @@ class CosmologySBI:
         # Setup embedding network and neural posterior estimator
         embedding_net = self.create_embedding_net()
         
-        # Initialize inference object
-        self.posterior_estimator = inference.SNPE(prior=self.prior)
+        # Initialize inference object with custom likelihood
+        self.posterior_estimator = inference.SNPE(
+            prior=self.prior,
+            density_estimator="maf",  # Using MAF for better performance
+            show_progress_bars=True
+        )
         
         # Generate training data
         print("\nGenerating training data...")
@@ -420,7 +453,6 @@ class CosmologySBI:
         for i in range(len(self.z_obs)//2 - 2, len(self.z_obs)//2 + 3):
             print(f"z = {self.z_obs[i]:.3f}: μ = {x[0,i,1]:.2f}")
 
-        
         # Create training data visualization
         print("\nCreating training data visualization...")
         plot_training_data(self.z_obs, self.mu_obs, self.mu_err, theta, x[:, :, 1], 
@@ -430,10 +462,19 @@ class CosmologySBI:
         x = x[:, :, 1]
         
         print("\nTraining the neural network...")
-        # Train the network
-        density_estimator = self.posterior_estimator.append_simulations(theta, x).train(
-            training_batch_size=SBIConfig.BATCH_SIZE
+        # Train the network with covariance-aware likelihood
+        density_estimator = self.posterior_estimator.append_simulations(
+            theta, x
+        ).train(
+            training_batch_size=SBIConfig.BATCH_SIZE,
+            retrain_from_scratch=False,
+            discard_prior_samples=False,
+            use_combined_loss=True,  # Better convergence with combined loss
+            max_num_epochs=1000,     # Set specific number of epochs
+            stop_after_epochs=50,    # Stop if no improvement after 50 epochs
+            show_train_summary=True
         )
+        
         self.posterior = self.posterior_estimator.build_posterior(density_estimator)
     
     def sample_posterior(self, num_samples=None):
@@ -746,7 +787,7 @@ if __name__ == "__main__":
     set_seed(RANDOM_SEED)  # Set seed at start of main
     
     # Load real data
-    z_obs, mu_obs, mu_err = load_real_data()
+    z_obs, mu_obs, mu_err, cov_matrix = load_real_data()
     print(f"Using {len(z_obs)} data points after filtering")
     
     samples_dict = {}
@@ -755,8 +796,8 @@ if __name__ == "__main__":
     for model_type in ["curved", "flat"]:
         print(f"\nTesting {model_type.capitalize()} ΛCDM model...")
         
-        # Initialize SBI
-        sbi = CosmologySBI(z_obs, mu_obs, mu_err)
+        # Initialize SBI with covariance matrix
+        sbi = CosmologySBI(z_obs, mu_obs, mu_err, cov_matrix)
         sbi.simulator.model_type = model_type
         
         # Train and sample
