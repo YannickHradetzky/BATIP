@@ -39,7 +39,7 @@ class SBIConfig:
     
     # SBI settings
     NUM_SIMULATIONS = 10000
-    NUM_POSTERIOR_SAMPLES = 100000  # Increased for better posterior visualization
+    NUM_POSTERIOR_SAMPLES = 1000000  # Increased for better posterior visualization
     BATCH_SIZE = 128    
     # Physics constants
     C = 299792.458  # Speed of light in km/s
@@ -51,18 +51,14 @@ class SBIConfig:
     DATA_PATH = '/Users/yhra/Documents/Master/Semester_3/BATIP/Supernova_project/Data/'
     PLOT_PATH = '/Users/yhra/Documents/Master/Semester_3/BATIP/Supernova_project/Plots/'
     
-    # Neural network settings
-    EMBEDDING_DIM = 2
-    HIDDEN_FEATURES = 64
-    NUM_TRANSFORMS = 5
     
     EPSILON = 1e-5
-    DEVICE = torch.device("mps")
+    DEVICE = torch.device("cpu")
     
     # Parameter priors (mean, std)
     PARAM_PRIORS = {
         'flat': {
-            'H0': (70.0, 1.5),  # centered at 70 with std of 1.5
+            'H0': (70.0, 1.5),  # centered at 70 with std of 2.5
             'Om': (0.3, 0.05)   # centered at 0.3 with std of 0.05
         },
         'curved': {
@@ -409,17 +405,7 @@ class CosmologySBI:
                 ),
                 1
             )
-    
-    def create_embedding_net(self):
-        """Create an embedding network for the data"""
-        return nn.Sequential(
-            nn.Linear(len(self.z_obs), SBIConfig.HIDDEN_FEATURES),
-            nn.ReLU(),
-            nn.Linear(SBIConfig.HIDDEN_FEATURES, SBIConfig.HIDDEN_FEATURES),
-            nn.ReLU(),
-            nn.Linear(SBIConfig.HIDDEN_FEATURES, SBIConfig.EMBEDDING_DIM),
-        )
-    
+
     def train(self):
         """Train the neural network with covariance-aware likelihood"""
         set_seed(SBIConfig.RANDOM_SEED)  # Set seed before training
@@ -511,6 +497,85 @@ class CosmologySBI:
         plt.tight_layout()
         plt.savefig(f'{SBIConfig.PLOT_PATH}sbi_back_{self.simulator.model_type}_posteriors.png', dpi=300, bbox_inches='tight')
         plt.close()
+
+def plot_autocorrelation(samples, model_type):
+    """Calculate the autocorrelation length for each parameter"""
+    # Convert to numpy array if needed
+    if torch.is_tensor(samples):
+        samples = samples.numpy()
+    
+    # Number of parameters
+    n_params = samples.shape[1]
+    
+    # Create figure
+    fig, axes = plt.subplots(1, n_params, figsize=(5*n_params, 4))
+    if n_params == 1:
+        axes = [axes]
+    
+    # Parameter names
+    param_names = ['H₀', 'Ωₘ'] if model_type == "flat" else ['H₀', 'Ωₘ', 'Ωₖ']
+    
+    corr_lengths = []
+    # Calculate autocorrelation for each parameter
+    for i in range(n_params):
+        # Calculate autocorrelation length and function
+        corr_length, autocorr = autocorrelation_length(samples[:, i])
+        corr_lengths.append(corr_length)
+        
+        # Create lag array for plotting
+        lags = np.arange(len(autocorr))
+        
+        # Plot
+        axes[i].plot(lags, autocorr)
+        axes[i].axhline(y=np.exp(-1), color='r', linestyle='--', alpha=0.5, 
+                       label='e⁻¹ threshold')
+        if corr_length is not None:
+            axes[i].axvline(x=corr_length, color='g', linestyle='--', alpha=0.5,
+                          label=f'Correlation length: {corr_length}')
+        
+        axes[i].set_title(f'{param_names[i]}')
+        axes[i].set_xlabel('Lag')
+        axes[i].set_ylabel('Autocorrelation')
+        axes[i].legend()
+        
+        print(f"Correlation length for {param_names[i]}: {corr_length}")
+    
+    plt.tight_layout()
+    plt.savefig(f'{SBIConfig.PLOT_PATH}autocorrelation_{model_type}.png', 
+                dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Return the maximum correlation length
+    max_corr_length = max(length for length in corr_lengths if length is not None)
+    return max_corr_length
+
+def autocorrelation_length(data):
+    """
+    Calculate the autocorrelation length of a given array.
+    
+    Parameters:
+    - data (array-like): Input array of numerical values.
+
+    Returns:
+    - corr_length (float): The correlation length where autocorrelation falls to e^-1.
+    - autocorr (np.ndarray): Autocorrelation values for each lag.
+    """
+    # Ensure input is a numpy array
+    data = np.asarray(data)
+    n = len(data)
+    
+    # Subtract the mean
+    data_mean = np.mean(data)
+    data -= data_mean
+    
+    # Compute the autocorrelation function
+    autocorr = np.correlate(data, data, mode='full')[n-1:] / (np.var(data) * n)
+    
+    # Find the correlation length (first lag where autocorr <= e^-1)
+    threshold = np.exp(-1)
+    corr_length = next((lag for lag, value in enumerate(autocorr) if value <= threshold), None)
+    
+    return corr_length, autocorr
 
 def plot_scientific_results(samples_flat=None, samples_curved=None, data_type="real"):
     """Create publication-quality plots of the results"""
@@ -731,7 +796,10 @@ if __name__ == "__main__":
         samples_dict[model_type] = sbi.sample_posterior()
 
         # back test the network
-        sbi.back_test_network()
+        # sbi.back_test_network()
+
+        # calculate the autocorrelation
+        # plot_autocorrelation(samples_dict[model_type], model_type)
     
     # Create final scientific plots
     print("\nCreating final visualization...")
