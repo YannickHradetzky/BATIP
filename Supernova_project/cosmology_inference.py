@@ -10,11 +10,12 @@ from numpyro.infer import MCMC, NUTS
 from numpyro import sample
 import matplotlib.pyplot as plt
 import corner
+
 # Configuration
 class Config:
     # MCMC settings
-    NUM_WARMUP = 2000
-    NUM_SAMPLES = 5000
+    NUM_WARMUP = 1000
+    NUM_SAMPLES = 1000
     NUM_CHAINS = 4
     TARGET_ACCEPT_PROB = 0.8
     MAX_TREE_DEPTH = 8
@@ -35,7 +36,7 @@ class Config:
     
     # Paths
     DATA_PATH = '/Users/Maxi/Desktop/Uni/Master/Cosmos/BATIP/Supernova_project/Data/'
-    PLOT_PATH = '/Users/Maxi/Desktop/Uni/Master/Cosmos/BATIP/Supernova_project/Plots'
+    PLOT_PATH = '/Users/Maxi/Desktop/Uni/Master/Cosmos/BATIP/Supernova_project/Plots/'
 
 # Set up JAX and NumPyro
 jax.config.update('jax_platform_name', 'cpu')
@@ -186,7 +187,7 @@ class CosmologyInference:
         mcmc.run(rng_key, z=self.z, mu_obs=self.mu_obs, mu_err=self.mu_err)
         
         print(mcmc.print_summary())
-        return mcmc.get_samples()
+        return mcmc.get_samples(group_by_chain=True)
     
     def plot_samples(self, samples, model_type="flat"):
         """Plot MCMC samples"""
@@ -276,22 +277,51 @@ class CosmologyInference:
 
         print(f"Plot saved to {Config.PLOT_PATH}{model_type}_distance_modulus.png")
 
+    def plot_trace(self, samples):
+        """Plot trace plots for the sampled parameters"""
+        num_params = len(samples)
+        fig, axes = plt.subplots(num_params, 1, figsize=(10, 2 * num_params), sharex=True)
+        for i, (param, values) in enumerate(samples.items()):
+            for chain in values:
+                axes[i].plot(chain)
+            axes[i].set_title(f'Trace plot for {param}')
+        plt.xlabel('Iteration')
+        plt.savefig(f'{Config.PLOT_PATH}trace_plots.png')
+        plt.close()
+    
     def Autocorrelation(self, samples, debug = False):
         """Calculate the autocorrelation of the samples for each parameter"""
+        # Combine samples from all chains
+        samples = {param: values.reshape(-1) for param, values in samples.items()}
+ 
         thin_samples = {}
         autocorr = {}
         autocorr_length = {}
         for param, values in samples.items():
             autocorr[param] = numpyro.diagnostics.autocorrelation(values)
-            # Calculate the autocorrelation length, excluding the zero-lag autocorrelation
-            autocorr_length[param] = 1 + 2 * np.sum(autocorr[param][1:])
+            if debug:
+                print(f"Autocorrelation for {param}: {autocorr[param]}")
+            # Calculate the autocorrelation length
+            auto_sum = np.sum(autocorr[param])
+            if debug:
+                print(f"Autocorrelation sum for {param}: {auto_sum}")   
+            autocorr_length[param] = auto_sum/2
+            if debug:
+                print(f"Autocorrelation length for {param}: {autocorr_length[param]}")
+            thin_samples[param] = values[::int(np.ceil(autocorr_length[param]))]
+            if debug:
+                # Store the autocorrelation values in a file
+                with open(f'{Config.DATA_PATH}{param}_autocorrelation.txt', 'w') as f:
+                    for lag, value in enumerate(autocorr[param]):
+                        f.write(f"{lag}\t{value}\n")
+                    f.write(f"Autocorrelation sum: {auto_sum}\n")
+                    f.write(f"Autocorrelation length: {autocorr_length[param]}")
             if autocorr_length[param] <= 0:
                 raise ValueError(f"Calculated negative or zero autocorrelation length for {param}: {autocorr_length[param]}")
-            thin_samples[param] = values[::int(autocorr_length[param])]
-            if debug:
-                print(f"Autocorrelation length for {param}: {autocorr_length[param]}, with {len(values)} samples, resulting in {len(thin_samples[param])} samples")
-        return thin_samples
+            
 
+        return thin_samples
+    
     
 # Example usage
 if __name__ == "__main__":
