@@ -9,6 +9,7 @@ from torch.distributions import Independent, Uniform, Normal
 from sbi import inference as inference
 from sbi.neural_nets.factory import posterior_nn
 from sbi.analysis import pairplot
+import corner
 
 # Set seeds for reproducibility
 RANDOM_SEED = 42
@@ -20,7 +21,7 @@ torch.backends.cudnn.benchmark = False
 class SBIConfig:
     # SBI settings
     NUM_SIMULATIONS = 100000
-    NUM_POSTERIOR_SAMPLES = 100000  # Increased for better posterior visualization
+    NUM_POSTERIOR_SAMPLES = 1000000  # Increased for better posterior visualization
     BATCH_SIZE = 128    
     # Physics constants
     C = 299792.458  # Speed of light in km/s
@@ -49,7 +50,7 @@ class SBIConfig:
         'curved': {
             'H0': (71.0, 5),
             'Om': (0.3, 0.1),  # centered at 0.45 with std of (0.9-0)/4
-            'Ok': (0.0, 0.0)      # centered at 0 with std of 0.1
+            'Ok': (0.0, 0.05)      # centered at 0 with std of 0.1
         }
     }
 
@@ -142,29 +143,27 @@ class CosmologicalSimulator:
 # TODO: torch.distributions for covariance matrix 
 # TODO: corner plot (corner package)
 def apply_curvature_correction(chi, Ok):
-    """Apply curvature correction to comoving distance"""
-    Ok_abs = torch.abs(Ok)
-    sqrt_abs_Ok = torch.sqrt(Ok_abs)
+    """Apply curvature correction to comoving distance, differentiating between positive and negative Ok
     
-    # Handle different curvature cases
-    pos_mask = Ok > 0
-    neg_mask = Ok < 0
-    flat_mask = Ok == 0
+    For Ok > 0 (open universe):
+        chi/sqrt(Ok) + (chi^3)/6 * sqrt(Ok) + (chi^5)/120 * sqrt(Ok)^3
+    For Ok < 0 (closed universe):
+        chi/sqrt(-Ok) - (chi^3)/6 * sqrt(-Ok) + (chi^5)/120 * sqrt(-Ok)^3
+    """
+    # Handle positive Ok
+    def positive_ok(Ok, chi):
+        sqrt_Ok = torch.sqrt(Ok + SBIConfig.EPSILON)
+        return chi/sqrt_Ok + (chi**3)/6 * sqrt_Ok + (chi**5)/120 * sqrt_Ok**3
     
-    result = torch.zeros_like(chi)
+    # Handle negative Ok
+    def negative_ok(Ok, chi):
+        sqrt_neg_Ok = torch.sqrt(-Ok + SBIConfig.EPSILON)
+        return chi/sqrt_neg_Ok - (chi**3)/6 * sqrt_neg_Ok + (chi**5)/120 * sqrt_neg_Ok**3
     
-    # TODO: Taylorentwicklung
-    # Positive curvature
-    if torch.any(pos_mask):
-        result[pos_mask] = torch.sinh(sqrt_abs_Ok[pos_mask] * chi[pos_mask]) / (sqrt_abs_Ok[pos_mask] + SBIConfig.EPSILON)
-    
-    # Negative curvature
-    if torch.any(neg_mask):
-        result[neg_mask] = torch.sin(sqrt_abs_Ok[neg_mask] * chi[neg_mask]) / (sqrt_abs_Ok[neg_mask] + SBIConfig.EPSILON)
-    
-    # Flat case
-    if torch.any(flat_mask):
-        result[flat_mask] = chi[flat_mask]
+    # Use where to select appropriate calculation based on Ok sign
+    result = torch.where(Ok > 0, 
+                        positive_ok(Ok, chi),
+                        negative_ok(Ok, chi))
     
     return result
 
@@ -216,7 +215,6 @@ def plot_training_data(z_obs, mu_obs, mu_err, theta, simulated_data, model_type=
         ax2.set_xlabel('Redshift (z)')
         ax2.set_ylabel('Distance Modulus (μ)')
         ax2.set_title('Model Predictions (n=50) vs Data')
-        ax2.set_xscale('log')
         ax2.legend()
         
         # Plot parameter distributions (bottom)
@@ -269,7 +267,6 @@ def plot_training_data(z_obs, mu_obs, mu_err, theta, simulated_data, model_type=
         ax3.set_xlabel('Redshift (z)')
         ax3.set_ylabel('Distance Modulus (μ)')
         ax3.set_title('Model Predictions (n=50) vs Data')
-        ax3.set_xscale('log')
         ax3.legend()
         
         # Plot parameter distributions (bottom)
@@ -391,11 +388,60 @@ class CosmologySBI:
         return self.posterior.sample((num_samples,), x=self.mu_obs)
     # TODO: Mit fake daten neuen Posterior bilden, für die Daten kennen wir die Parameter
 
-def plot_scientific_results(samples_flat=None, samples_curved=None, save_path=None):
+    def back_test_network(self):
+        """Test the network with simulated data"""
+        # create fake data
+        theta = self.prior.sample((1,))  # Sample a single set of parameters
+        x = self.simulator.simulate(theta)
+        # Extract just the distance modulus values (second dimension)
+        x = x[0, :, 1]  # Shape should now be (n_redshifts,)
+        
+        # Sample from posterior using the simulated data
+        samples = self.posterior.sample((SBIConfig.NUM_POSTERIOR_SAMPLES,), x=x)
+        
+        # Create plots
+        if self.simulator.model_type == "flat":
+            fig, axes = plt.subplots(1, 3, figsize=(20, 5))
+            omega_l = 1 - samples[:, 1]
+        else:
+            fig, axes = plt.subplots(1, 4, figsize=(25, 5))
+            omega_l = 1 - samples[:, 1] - samples[:, 2]
+        
+        # Plot distributions
+        axes[0].hist(samples[:, 0], bins=50, color='skyblue', edgecolor='black', density=True)
+        axes[0].set_title('H₀ Distribution')
+        axes[0].set_xlabel('H₀ [km/s/Mpc]')
+        axes[0].set_ylabel('Frequency')
+
+        axes[1].hist(samples[:, 1], bins=50, color='lightgreen', edgecolor='black', density=True)
+        axes[1].set_title('Ωₘ Distribution')
+        axes[1].set_xlabel('Ωₘ')
+        axes[1].set_ylabel('Frequency')
+
+        axes[2].hist(omega_l, bins=50, color='salmon', edgecolor='black', density=True)
+        axes[2].set_title('Ωₗ Distribution')
+        axes[2].set_xlabel('Ωₗ')
+        axes[2].set_ylabel('Frequency')
+
+        if self.simulator.model_type == "curved":
+            axes[3].hist(samples[:, 2], bins=50, color='purple', edgecolor='black', density=True)
+            axes[3].set_title('Ωₖ Distribution')
+            axes[3].set_xlabel('Ωₖ')
+            axes[3].set_ylabel('Frequency')
+
+        plt.tight_layout()
+        plt.savefig(f'{SBIConfig.PLOT_PATH}sbi_back_{self.simulator.model_type}_posteriors.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+def plot_scientific_results(samples_flat=None, samples_curved=None, data_type="real"):
     """Create publication-quality plots of the results"""
     for model_type, samples in [("flat", samples_flat), ("curved", samples_curved)]:
         if samples is None:
             continue
+            
+        # Convert tensor to numpy array if needed
+        if torch.is_tensor(samples):
+            samples = samples.numpy()
             
         # Calculate Omega_lambda
         omega_l = 1 - samples[:, 1] if model_type == "flat" else 1 - samples[:, 1] - samples[:, 2]
@@ -442,8 +488,33 @@ def plot_scientific_results(samples_flat=None, samples_curved=None, save_path=No
             axes[3].set_ylabel('Frequency')
         
         plt.tight_layout()
-        plt.savefig(f'{SBIConfig.PLOT_PATH}sbi_{model_type}_posteriors.png', dpi=300, bbox_inches='tight')
+        if data_type == "fake":
+            plt.savefig(f'{SBIConfig.PLOT_PATH}sbi_{model_type}_posteriors_fake.png', dpi=300, bbox_inches='tight')
+        else:
+            plt.savefig(f'{SBIConfig.PLOT_PATH}sbi_{model_type}_posteriors.png', dpi=300, bbox_inches='tight')
         plt.close()
+
+        # Create corner plot
+        if model_type == "curved":
+            fig = corner.corner(samples, labels=['H0', 'Om', 'Ok'], 
+                              plot_datapoints=False, plot_density=False, 
+                              contours=True, fill_contours=True, 
+                              levels=[0.68, 0.95, 0.997])
+        else:
+            fig = corner.corner(samples, labels=['H0', 'Om'], 
+                              plot_datapoints=False, plot_density=False, 
+                              contours=True, fill_contours=True, 
+                              levels=[0.68, 0.95, 0.997])
+            
+        if data_type == "fake":
+            plt.savefig(f'{SBIConfig.PLOT_PATH}sbi_{model_type}_corner_plot_fake.png', dpi=300, bbox_inches='tight')
+        else:
+            plt.savefig(f'{SBIConfig.PLOT_PATH}sbi_{model_type}_corner_plot.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+
+
+
 
 if __name__ == "__main__":
     # Load real data
@@ -453,7 +524,7 @@ if __name__ == "__main__":
     samples_dict = {}
     
     # Test both models with a few samples
-    for model_type in ["flat", "curved"]:
+    for model_type in ["curved", "flat"]:
         print(f"\nTesting {model_type.capitalize()} ΛCDM model...")
         
         # Initialize SBI
@@ -465,10 +536,13 @@ if __name__ == "__main__":
         sbi.train()
         print("\nSampling from posterior...")
         samples_dict[model_type] = sbi.sample_posterior()
+
+        # back test the network
+        sbi.back_test_network()
     
     # Create final scientific plots
     print("\nCreating final visualization...")
     plot_scientific_results(
         samples_flat=samples_dict["flat"],
-        samples_curved=samples_dict["curved"]
+        samples_curved=samples_dict["curved"],
     )

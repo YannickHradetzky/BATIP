@@ -239,28 +239,6 @@ class CosmologyInference:
         else:
             Ok = np.zeros(10000)
         
-        # Define ranges for the corner plot
-        ranges = [
-            (50, 80),     # H0 range
-            (0.1, 0.5),   # Om range
-            (-0.03, 0.03) # Ok range
-        ]
-        
-        # make a corner plot
-        fig = corner.corner(
-            np.stack([H0, Om, Ok], axis=-1), 
-            labels=['H0', 'Om', 'Ok'],
-            range=ranges,
-            plot_datapoints=False,
-            plot_density=False,
-            plot_contours=True,
-            fill_contours=True,
-            levels=[0.68, 0.95, 0.997],
-            plot_contours_kwargs={'colors': ['red', 'green', 'blue']}
-        )
-        plt.savefig(f'{Config.PLOT_PATH}{model_type}_corner_plot.png')
-        plt.close()
-
         # plot the distance modulus for each combination
         plt.figure(figsize=(10, 8))
         plt.title('Distance Modulus')
