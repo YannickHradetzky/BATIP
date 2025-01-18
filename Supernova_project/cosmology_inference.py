@@ -10,12 +10,13 @@ from numpyro.infer import MCMC, NUTS
 from numpyro import sample
 import matplotlib.pyplot as plt
 import corner
+import os
 
 # Configuration
 class Config:
     # MCMC settings
-    NUM_WARMUP = 1000
-    NUM_SAMPLES = 1000
+    NUM_WARMUP = 3000
+    NUM_SAMPLES = 3000
     NUM_CHAINS = 4
     TARGET_ACCEPT_PROB = 0.8
     MAX_TREE_DEPTH = 8
@@ -187,7 +188,7 @@ class CosmologyInference:
         mcmc.run(rng_key, z=self.z, mu_obs=self.mu_obs, mu_err=self.mu_err)
         
         print(mcmc.print_summary())
-        return mcmc.get_samples(group_by_chain=True)
+        return mcmc.get_samples()#group_by_chain=True)
     
     def plot_samples(self, samples, model_type="flat"):
         """Plot MCMC samples"""
@@ -292,7 +293,7 @@ class CosmologyInference:
     def Autocorrelation(self, samples, debug = False):
         """Calculate the autocorrelation of the samples for each parameter"""
         # Combine samples from all chains
-        samples = {param: values.reshape(-1) for param, values in samples.items()}
+        #samples = {param: values.reshape(-1) for param, values in samples.items()}
  
         thin_samples = {}
         autocorr = {}
@@ -302,26 +303,50 @@ class CosmologyInference:
             if debug:
                 print(f"Autocorrelation for {param}: {autocorr[param]}")
             # Calculate the autocorrelation length
-            auto_sum = np.sum(autocorr[param])
+            auto_sum = np.sum(autocorr[param][0:len(values)//10])
             if debug:
                 print(f"Autocorrelation sum for {param}: {auto_sum}")   
             autocorr_length[param] = auto_sum/2
             if debug:
                 print(f"Autocorrelation length for {param}: {autocorr_length[param]}")
             thin_samples[param] = values[::int(np.ceil(autocorr_length[param]))]
-            if debug:
-                # Store the autocorrelation values in a file
-                with open(f'{Config.DATA_PATH}{param}_autocorrelation.txt', 'w') as f:
-                    for lag, value in enumerate(autocorr[param]):
-                        f.write(f"{lag}\t{value}\n")
-                    f.write(f"Autocorrelation sum: {auto_sum}\n")
-                    f.write(f"Autocorrelation length: {autocorr_length[param]}")
+            # Store the autocorrelation values in a file
+            with open(f'{Config.DATA_PATH}{param}_autocorrelation.txt', 'w') as f:
+                for lag, value in enumerate(autocorr[param]):
+                    f.write(f"{lag}\t{value}\n")
+                f.write(f"Autocorrelation sum: {auto_sum}\n")
+                f.write(f"Autocorrelation length: {autocorr_length[param]}")
             if autocorr_length[param] <= 0:
                 raise ValueError(f"Calculated negative or zero autocorrelation length for {param}: {autocorr_length[param]}")
-            
-
+        self.plot_autocorrelation()    
         return thin_samples
     
+    def plot_autocorrelation(self):
+        # Plot autocorrelation lags
+        autocorr_files = [f for f in os.listdir(Config.DATA_PATH) if f.endswith('_autocorrelation.txt')]
+        
+        for file in autocorr_files:
+            param = file.split('_')[0]
+            lags = []
+            autocorr_values = []
+            
+            with open(Config.DATA_PATH + file, 'r') as f:
+                for line in f:
+                    if line.startswith("Autocorrelation sum") or line.startswith("Autocorrelation length"):
+                        continue
+                    lag, value = line.strip().split('\t')
+                    lags.append(int(lag))
+                    autocorr_values.append(float(value))
+            
+            plt.figure(figsize=(10, 5))
+            plt.plot(lags, autocorr_values, label=f'Autocorrelation of {param}')
+            plt.xlabel('Lag')
+            plt.ylabel('Autocorrelation')
+            plt.title(f'Autocorrelation Plot for {param}')
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(f'{Config.PLOT_PATH}{param}_autocorrelation_plot.png')
+            plt.close()
     
 # Example usage
 if __name__ == "__main__":
@@ -333,7 +358,7 @@ if __name__ == "__main__":
     flat_samples = cosmo.run_inference(model_type="flat")
     
     # Test for autocorrelation and discard correlated samples
-    thin_flat_samples = cosmo.Autocorrelation(flat_samples, debug = True)
+    thin_flat_samples = cosmo.Autocorrelation(flat_samples, debug = False)
     cosmo.plot_samples(flat_samples, model_type="flat")
     
     # Run curved model
