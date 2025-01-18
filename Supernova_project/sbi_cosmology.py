@@ -10,18 +10,49 @@ from sbi import inference as inference
 from sbi.neural_nets.factory import posterior_nn
 from sbi.analysis import pairplot
 import corner
+import random
 
-# Set seeds for reproducibility
+# Set global random seed at the very top of the file
 RANDOM_SEED = 42
-torch.manual_seed(RANDOM_SEED)
-np.random.seed(RANDOM_SEED)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+
+# Set seeds for all random number generators
+import os
+os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from torch import nn
+from torch.distributions import Independent, Uniform, Normal
+from sbi import inference as inference
+from sbi.neural_nets.factory import posterior_nn
+from sbi.analysis import pairplot
+import corner
+
+# Set all random seeds
+def set_seed(seed):
+    """Set all random seeds for reproducibility"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    if hasattr(torch.backends, 'mps'):
+        torch.backends.mps.deterministic = True
+
+# Call set_seed at the start
+set_seed(RANDOM_SEED)
 
 class SBIConfig:
+    # Add random seed to config
+    RANDOM_SEED = RANDOM_SEED
+    
     # SBI settings
-    NUM_SIMULATIONS = 100000
-    NUM_POSTERIOR_SAMPLES = 1000000  # Increased for better posterior visualization
+    NUM_SIMULATIONS = 10000
+    NUM_POSTERIOR_SAMPLES = 100000  # Increased for better posterior visualization
     BATCH_SIZE = 128    
     # Physics constants
     C = 299792.458  # Speed of light in km/s
@@ -34,22 +65,22 @@ class SBIConfig:
     PLOT_PATH = '/Users/yhra/Documents/Master/Semester_3/BATIP/Supernova_project/Plots/'
     
     # Neural network settings
-    EMBEDDING_DIM = 16
-    HIDDEN_FEATURES = 128
-    NUM_TRANSFORMS = 10
+    EMBEDDING_DIM = 2
+    HIDDEN_FEATURES = 64
+    NUM_TRANSFORMS = 5
     
     EPSILON = 1e-5
-    DEVICE = torch.device("cpu")
+    DEVICE = torch.device("mps")
     
     # Parameter priors (mean, std)
     PARAM_PRIORS = {
         'flat': {
-            'H0': (71.0, 5),  # centered at 70 with std of 2.5
-            'Om': (0.3, 0.1)   # centered at 0.3 with std of 0.05
+            'H0': (70.0, 2.5),  # centered at 70 with std of 2.5
+            'Om': (0.3, 0.05)   # centered at 0.3 with std of 0.05
         },
         'curved': {
-            'H0': (71.0, 5),
-            'Om': (0.3, 0.1),  # centered at 0.45 with std of (0.9-0)/4
+            'H0': (70.0, 2.5),
+            'Om': (0.3, 0.05),  # centered at 0.45 with std of (0.9-0)/4
             'Ok': (0.0, 0.05)      # centered at 0 with std of 0.1
         }
     }
@@ -57,6 +88,7 @@ class SBIConfig:
 class CosmologicalSimulator:
     def __init__(self, z_obs, model_type="flat"):
         """Initialize the simulator with observed redshift values"""
+        set_seed(SBIConfig.RANDOM_SEED)  # Set seed in constructor
         self.z = torch.as_tensor(z_obs, dtype=torch.float32).clone().detach()
         self.model_type = model_type
         
@@ -205,12 +237,20 @@ def plot_training_data(z_obs, mu_obs, mu_err, theta, simulated_data, model_type=
         ax2.errorbar(z_obs.numpy(), mu_obs.numpy(), yerr=mu_err.numpy(),
                     fmt='r.', alpha=0.5, label='Data', markersize=2)
         
-        # Plot random subset of simulations with fixed seed
-        rng = np.random.RandomState(RANDOM_SEED)
-        indices = rng.choice(len(theta), 50, replace=False)
-        for idx in indices:
-            ax2.plot(z_obs.numpy(), simulated_data[idx].numpy(), 
-                    'b-', alpha=0.1)
+        # Plot all simulations to show distribution
+        simulated_mean = simulated_data.mean(dim=0).numpy()
+        simulated_std = simulated_data.std(dim=0).numpy()
+        
+        # Plot mean and standard deviation bands
+        ax2.fill_between(z_obs.numpy(), 
+                        simulated_mean - 2*simulated_std,
+                        simulated_mean + 2*simulated_std,
+                        color='b', alpha=0.1, label='2σ region')
+        ax2.fill_between(z_obs.numpy(),
+                        simulated_mean - simulated_std,
+                        simulated_mean + simulated_std,
+                        color='b', alpha=0.2, label='1σ region')
+        ax2.plot(z_obs.numpy(), simulated_mean, 'b-', label='Mean prediction')
         
         ax2.set_xlabel('Redshift (z)')
         ax2.set_ylabel('Distance Modulus (μ)')
@@ -257,12 +297,25 @@ def plot_training_data(z_obs, mu_obs, mu_err, theta, simulated_data, model_type=
         ax3.errorbar(z_obs.numpy(), mu_obs.numpy(), yerr=mu_err.numpy(),
                     fmt='r.', alpha=0.5, label='Data', markersize=2)
         
-        # Plot random subset of simulations
-        rng = np.random.RandomState(RANDOM_SEED)
-        indices = rng.choice(len(theta), 50, replace=False)
-        for idx in indices:
-            ax3.plot(z_obs.numpy(), simulated_data[idx].numpy(), 
-                    'b-', alpha=0.1)
+        # Plot all simulations to show distribution
+        simulated_mean = simulated_data.mean(dim=0).numpy()
+        simulated_std = simulated_data.std(dim=0).numpy()
+        
+        # Plot mean and standard deviation bands
+        ax3.fill_between(z_obs.numpy(), 
+                        simulated_mean - 2*simulated_std,
+                        simulated_mean + 2*simulated_std,
+                        color='b', alpha=0.2, label='95% CI')
+        ax3.fill_between(z_obs.numpy(),
+                        simulated_mean - simulated_std, 
+                        simulated_mean + simulated_std,
+                        color='b', alpha=0.3, label='68% CI')
+        ax3.plot(z_obs.numpy(), simulated_mean, 'b-', label='Mean prediction')
+        
+        # Plot all individual simulations with high transparency
+        for i in range(len(simulated_data)):
+            ax3.plot(z_obs.numpy(), simulated_data[i].numpy(),
+                    'b-', alpha=0.01)
         
         ax3.set_xlabel('Redshift (z)')
         ax3.set_ylabel('Distance Modulus (μ)')
@@ -292,6 +345,7 @@ def plot_training_data(z_obs, mu_obs, mu_err, theta, simulated_data, model_type=
 class CosmologySBI:
     def __init__(self, z_obs, mu_obs, mu_err):
         """Initialize the SBI trainer with observed data"""
+        set_seed(SBIConfig.RANDOM_SEED)  # Set seed in constructor
         self.z_obs = z_obs
         self.mu_obs = mu_obs
         self.mu_err = mu_err
@@ -336,6 +390,7 @@ class CosmologySBI:
     
     def train(self):
         """Train the neural network"""
+        set_seed(SBIConfig.RANDOM_SEED)  # Set seed before training
         # Setup prior based on current model type
         self.setup_prior()
         
@@ -380,9 +435,10 @@ class CosmologySBI:
             training_batch_size=SBIConfig.BATCH_SIZE
         )
         self.posterior = self.posterior_estimator.build_posterior(density_estimator)
-    # TODO: 
+    
     def sample_posterior(self, num_samples=None):
         """Sample from the posterior distribution"""
+        set_seed(SBIConfig.RANDOM_SEED)  # Set seed before sampling
         if num_samples is None:
             num_samples = SBIConfig.NUM_POSTERIOR_SAMPLES
         return self.posterior.sample((num_samples,), x=self.mu_obs)
@@ -390,6 +446,7 @@ class CosmologySBI:
 
     def back_test_network(self):
         """Test the network with simulated data"""
+        set_seed(SBIConfig.RANDOM_SEED)  # Set seed before back testing
         # create fake data
         theta = self.prior.sample((1,))  # Sample a single set of parameters
         x = self.simulator.simulate(theta)
@@ -449,8 +506,12 @@ def plot_scientific_results(samples_flat=None, samples_curved=None, data_type="r
         # Create figure
         if model_type == "flat":
             fig, axes = plt.subplots(1, 3, figsize=(20, 5))
+            fig.suptitle(f'Parameter Distributions for Flat ΛCDM Model{" (Simulated Data)" if data_type=="fake" else ""}', 
+                        fontsize=16, y=1.05)
         else:
             fig, axes = plt.subplots(1, 4, figsize=(25, 5))
+            fig.suptitle(f'Parameter Distributions for Curved ΛCDM Model{" (Simulated Data)" if data_type=="fake" else ""}', 
+                        fontsize=16, y=1.05)
         
         # Common plot settings
         plt.rcParams.update({
@@ -464,26 +525,26 @@ def plot_scientific_results(samples_flat=None, samples_curved=None, data_type="r
         
         # H0 distribution
         axes[0].hist(samples[:, 0], bins=50, color='skyblue', edgecolor='black', density=True)
-        axes[0].set_title('H₀ Distribution')
+        axes[0].set_title('Hubble Parameter Distribution')
         axes[0].set_xlabel('H₀ [km/s/Mpc]')
         axes[0].set_ylabel('Frequency')
         
         # Omega_m distribution
         axes[1].hist(samples[:, 1], bins=50, color='lightgreen', edgecolor='black', density=True)
-        axes[1].set_title('Ωₘ Distribution')
+        axes[1].set_title('Matter Density Distribution')
         axes[1].set_xlabel('Ωₘ')
         axes[1].set_ylabel('Frequency')
         
         # Omega_lambda distribution
         axes[2].hist(omega_l, bins=50, color='salmon', edgecolor='black', density=True)
-        axes[2].set_title('Ωₗ Distribution')
+        axes[2].set_title('Dark Energy Density Distribution')
         axes[2].set_xlabel('Ωₗ')
         axes[2].set_ylabel('Frequency')
         
         if model_type == "curved":
             # Ok distribution
             axes[3].hist(samples[:, 2], bins=50, color='purple', edgecolor='black', density=True)
-            axes[3].set_title('Ωₖ Distribution')
+            axes[3].set_title('Curvature Density Distribution')
             axes[3].set_xlabel('Ωₖ')
             axes[3].set_ylabel('Frequency')
         
@@ -496,15 +557,41 @@ def plot_scientific_results(samples_flat=None, samples_curved=None, data_type="r
 
         # Create corner plot
         if model_type == "curved":
-            fig = corner.corner(samples, labels=['H0', 'Om', 'Ok'], 
-                              plot_datapoints=False, plot_density=False, 
-                              contours=True, fill_contours=True, 
-                              levels=[0.68, 0.95, 0.997])
+            fig = corner.corner(
+                samples, 
+                labels=['H₀', 'Ωₘ', 'Ωₖ'], 
+                plot_datapoints=False, 
+                plot_density=False, 
+                contours=True, 
+                fill_contours=True, 
+                levels=[0.68, 0.95, 0.997],
+                title_kwargs={"fontsize": 16},
+                label_kwargs={"fontsize": 14}, 
+                color="skyblue"
+            )
+            plt.suptitle(
+                f'Corner Plot for Curved ΛCDM Model{" (Simulated Data)" if data_type=="fake" else ""}', 
+                fontsize=16, 
+                y=1.02
+            )
         else:
-            fig = corner.corner(samples, labels=['H0', 'Om'], 
-                              plot_datapoints=False, plot_density=False, 
-                              contours=True, fill_contours=True, 
-                              levels=[0.68, 0.95, 0.997])
+            fig = corner.corner(
+                samples, 
+                labels=['H₀', 'Ωₘ'], 
+                plot_datapoints=False, 
+                plot_density=False, 
+                contours=True, 
+                fill_contours=True, 
+                levels=[0.68, 0.95, 0.997],
+                title_kwargs={"fontsize": 16},
+                label_kwargs={"fontsize": 14}, 
+                color="skyblue"
+            )
+            plt.suptitle(
+                f'Corner Plot for Flat ΛCDM Model{" (Simulated Data)" if data_type=="fake" else ""}', 
+                fontsize=16, 
+                y=1.02
+            )
             
         if data_type == "fake":
             plt.savefig(f'{SBIConfig.PLOT_PATH}sbi_{model_type}_corner_plot_fake.png', dpi=300, bbox_inches='tight')
@@ -514,9 +601,9 @@ def plot_scientific_results(samples_flat=None, samples_curved=None, data_type="r
 
 
 
-
-
 if __name__ == "__main__":
+    set_seed(RANDOM_SEED)  # Set seed at start of main
+    
     # Load real data
     z_obs, mu_obs, mu_err = load_real_data()
     print(f"Using {len(z_obs)} data points after filtering")
