@@ -15,6 +15,7 @@ from sbi.neural_nets.factory import posterior_nn
 from sbi.analysis import pairplot
 import corner
 import random
+import numpyro.diagnostics as diagnostics
 
 # Set all random seeds
 def set_seed(seed):
@@ -38,8 +39,8 @@ class SBIConfig:
     RANDOM_SEED = RANDOM_SEED
     
     # SBI settings
-    NUM_SIMULATIONS = 10000
-    NUM_POSTERIOR_SAMPLES = 1000000  # Increased for better posterior visualization
+    NUM_SIMULATIONS = 1000
+    NUM_POSTERIOR_SAMPLES = 10000  # Increased for better posterior visualization
     BATCH_SIZE = 128    
     # Physics constants
     C = 299792.458  # Speed of light in km/s
@@ -48,8 +49,8 @@ class SBIConfig:
     MIN_REDSHIFT = 0.001
     
     # Paths
-    DATA_PATH = '/Users/yhra/Documents/Master/Semester_3/BATIP/Supernova_project/Data/'
-    PLOT_PATH = '/Users/yhra/Documents/Master/Semester_3/BATIP/Supernova_project/Plots/'
+    DATA_PATH = '/Users/Maxi/Desktop/Uni/Master/Cosmos/BATIP/Supernova_project/Data/'
+    PLOT_PATH = '/Users/Maxi/Desktop/Uni/Master/Cosmos/BATIP/Supernova_project/Plots/'
     
     
     EPSILON = 1e-5
@@ -771,6 +772,65 @@ def plot_model_comparison(samples_flat, samples_curved, data_type="real"):
                    dpi=300, bbox_inches='tight')
     plt.close()
     
+def Autocorrelation(samples, debug = False):
+    """Calculate the autocorrelation of the samples for each parameter"""
+    thin_samples = {}
+    autocorr = {}
+    autocorr_length = {}
+    sample_names = ['H0', 'Om', 'Ok'] if samples.shape[1] == 3 else ['H0', 'Om']
+    name = "curved" if samples.shape[1] == 3 else "flat"
+    for i in range(len(samples[1,:])):
+        values = samples[:,i]
+        autocorr[i] = diagnostics.autocorrelation(values)
+        if debug:
+            print(f"Autocorrelation for {i}: {autocorr[i]}")
+        # Calculate the autocorrelation length
+        auto_sum = np.sum(autocorr[i][0:len(values)//10])
+        if debug:
+            print(f"Autocorrelation sum for {i}: {auto_sum}")   
+        autocorr_length[i] = auto_sum/2
+        if debug:
+            print(f"Autocorrelation length for {i}: {autocorr_length[i]}")
+        thin_samples[i] = values[::int(np.ceil(autocorr_length[i]))]
+        # Store the autocorrelation values in a file
+        with open(f'{SBIConfig.DATA_PATH}SBI_{name}_{sample_names[i]}_autocorrelation_sbi.txt', 'w') as f:
+            for lag, value in enumerate(autocorr[i]):
+                f.write(f"{lag}\t{value}\n")
+            f.write(f"Autocorrelation sum: {auto_sum}\n")
+            f.write(f"Autocorrelation length: {autocorr_length[i]}")
+        if autocorr_length[i] <= 0:
+            raise ValueError(f"Calculated negative or zero autocorrelation length for {i}: {autocorr_length[i]}")  
+    plot_autocorrelation(name)
+    return thin_samples
+
+def plot_autocorrelation(model_type):
+    # Plot autocorrelation lags
+    autocorr_files = [f for f in os.listdir(SBIConfig.DATA_PATH) if f.endswith('_autocorrelation_sbi.txt')]
+    
+    for file in autocorr_files:
+        param = file.split('_')[2]
+        model_type = file.split('_')[1]
+        lags = []
+        autocorr_values = []
+        
+        with open(SBIConfig.DATA_PATH + file, 'r') as f:
+            for line in f:
+                if line.startswith("Autocorrelation sum") or line.startswith("Autocorrelation length"):
+                    continue
+                lag, value = line.strip().split('\t')
+                lags.append(int(lag))
+                autocorr_values.append(float(value))
+        
+        plt.figure(figsize=(10, 5))
+        plt.plot(lags, autocorr_values, label=f'Autocorrelation of {param}')
+        plt.xlabel('Lag')
+        plt.ylabel('Autocorrelation')
+        plt.title(f'Autocorrelation Plot for {param}')
+        plt.ylim(-0.5, 0.5)
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(f'{SBIConfig.PLOT_PATH}SBI_{model_type}_{param}_autocorrelation_plot.png')
+        plt.close()
 
 if __name__ == "__main__":
     set_seed(RANDOM_SEED)  # Set seed at start of main
@@ -782,7 +842,7 @@ if __name__ == "__main__":
     samples_dict = {}
     
     # Test both models with a few samples
-    for model_type in ["curved", "flat"]:
+    for model_type in ["curved"]:#, "flat"]:
         print(f"\nTesting {model_type.capitalize()} ΛCDM model...")
         
         # Initialize SBI with covariance matrix
@@ -794,6 +854,7 @@ if __name__ == "__main__":
         sbi.train()
         print("\nSampling from posterior...")
         samples_dict[model_type] = sbi.sample_posterior()
+        thinned_samples = Autocorrelation(samples_dict[model_type], debug = False)
 
         # back test the network
         # sbi.back_test_network()
@@ -801,7 +862,7 @@ if __name__ == "__main__":
         # calculate the autocorrelation
         # plot_autocorrelation(samples_dict[model_type], model_type)
     
-    # Create final scientific plots
+    """# Create final scientific plots
     print("\nCreating final visualization...")
     plot_scientific_results(
         samples_flat=samples_dict["flat"],
@@ -812,4 +873,4 @@ if __name__ == "__main__":
     plot_model_comparison(
         samples_flat=samples_dict["flat"],
         samples_curved=samples_dict["curved"]
-    )
+    )"""
