@@ -157,7 +157,7 @@ class CosmologicalSimulator:
         d_L = self.luminosity_distance(H0, Om, Ok)
         return 5 * torch.log10(d_L + SBIConfig.EPSILON) + 25
     
-    def simulate(self, params):
+    def simulate(self, params, cov_matrix=None):
         """Simulate distance moduli for given parameters"""
         if params.ndim == 1:
             params = params.unsqueeze(0)
@@ -169,6 +169,10 @@ class CosmologicalSimulator:
             H0, Om, Ok = params[:, 0], params[:, 1], params[:, 2]
             mu = self.distance_modulus(H0, Om, Ok)
         
+        if cov_matrix is not None:
+            error = torch.distributions.MultivariateNormal(loc=mu, covariance_matrix=cov_matrix).sample()
+            mu = mu + error
+
         # Return both z and mu for each simulation
         return torch.stack([self.z.expand(len(params), -1), mu], dim=-1)
     
