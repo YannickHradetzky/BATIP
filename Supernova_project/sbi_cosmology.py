@@ -1,17 +1,3 @@
-import os
-os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
-
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from torch import nn
-from torch.distributions import Independent, Uniform, Normal, MultivariateNormal
-from sbi import inference as inference
-from sbi.neural_nets.factory import posterior_nn
-from sbi.analysis import pairplot
-import corner
-import random
-
 # Set global random seed at the very top of the file
 RANDOM_SEED = 42
 
@@ -28,6 +14,7 @@ from sbi import inference as inference
 from sbi.neural_nets.factory import posterior_nn
 from sbi.analysis import pairplot
 import corner
+import random
 
 # Set all random seeds
 def set_seed(seed):
@@ -75,13 +62,13 @@ class SBIConfig:
     # Parameter priors (mean, std)
     PARAM_PRIORS = {
         'flat': {
-            'H0': (70.0, 2.5),  # centered at 70 with std of 2.5
+            'H0': (70.0, 1.5),  # centered at 70 with std of 1.5
             'Om': (0.3, 0.05)   # centered at 0.3 with std of 0.05
         },
         'curved': {
-            'H0': (70.0, 2.5),
-            'Om': (0.3, 0.05),  # centered at 0.45 with std of (0.9-0)/4
-            'Ok': (0.0, 0.05)      # centered at 0 with std of 0.1
+            'H0': (70.0, 1.5),
+            'Om': (0.3, 0.05),  # centered at 0.3 with std of 0.05
+            'Ok': (0.0, 0.05)      # centered at 0 with std of 0.05
         }
     }
 
@@ -170,9 +157,21 @@ class CosmologicalSimulator:
             mu = self.distance_modulus(H0, Om, Ok)
         
         if cov_matrix is not None:
-            error = torch.distributions.MultivariateNormal(loc=mu, covariance_matrix=cov_matrix).sample()
-            mu = mu + error
-
+            # Create error distribution for each simulation
+            batch_size = len(params)
+            errors = torch.zeros_like(mu)
+            
+            # Sample errors for each simulation independently
+            for i in range(batch_size):
+                error_dist = MultivariateNormal(
+                    loc=torch.zeros_like(self.z),
+                    covariance_matrix=cov_matrix
+                )
+                errors[i] = error_dist.sample()
+            
+            # Add errors to simulated distance moduli
+            mu = mu + errors
+        
         # Return both z and mu for each simulation
         return torch.stack([self.z.expand(len(params), -1), mu], dim=-1)
     
@@ -229,7 +228,7 @@ def load_real_data():
     mu_err = torch.as_tensor(mu_err, dtype=torch.float32).clone().detach()
 
     # Create covariance matrix
-    cov_data = np.loadtxt(SBIConfig.DATA_PATH + 'Pantheon+SH0ES_STAT+SYS.cov')
+    cov_data = np.loadtxt(SBIConfig.DATA_PATH + 'Pantheon+SH0ES_STATONLY.cov')
     cov_matrix = _create_cov_mat(cov_data)
     
     return z_obs, mu_obs, mu_err, cov_matrix
@@ -427,38 +426,17 @@ class CosmologySBI:
         # Setup prior based on current model type
         self.setup_prior()
         
-        # Setup embedding network and neural posterior estimator
-        embedding_net = self.create_embedding_net()
-        
         # Initialize inference object with custom likelihood
         self.posterior_estimator = inference.SNPE(
             prior=self.prior,
             density_estimator="maf",  # Using MAF for better performance
-            show_progress_bars=True
+            show_progress_bars=True,
         )
         
         # Generate training data
         print("\nGenerating training data...")
         theta = self.prior.sample((SBIConfig.NUM_SIMULATIONS,))
-        x = self.simulator.simulate(theta)
-
-        # Print example of sampled parameters and simulated data
-        print("\nExample simulation:")
-        print(f"Sampled parameters (theta[0]):")
-        if self.simulator.model_type == "flat":
-            print(f"H₀ = {theta[0,0]:.2f} km/s/Mpc")
-            print(f"Ωₘ = {theta[0,1]:.2f}")
-        else:
-            print(f"H₀ = {theta[0,0]:.2f} km/s/Mpc")
-            print(f"Ωₘ = {theta[0,1]:.2f}")
-            print(f"Ωₖ = {theta[0,2]:.2f}")
-        
-        print("\nSimulated distance moduli (middle 5 redshift points):")
-        for i in range(len(self.z_obs)//2 - 2, len(self.z_obs)//2 + 3):
-            print(f"z = {self.z_obs[i]:.3f}: μ = {x[0,i,1]:.2f}")
-
-        # Create training data visualization
-        print("\nCreating training data visualization...")
+        x = self.simulator.simulate(theta, self.cov_matrix)
         plot_training_data(self.z_obs, self.mu_obs, self.mu_err, theta, x[:, :, 1], 
                           model_type=self.simulator.model_type)
         
@@ -487,7 +465,6 @@ class CosmologySBI:
         if num_samples is None:
             num_samples = SBIConfig.NUM_POSTERIOR_SAMPLES
         return self.posterior.sample((num_samples,), x=self.mu_obs)
-    # TODO: Mit fake daten neuen Posterior bilden, für die Daten kennen wir die Parameter
 
     def back_test_network(self):
         """Test the network with simulated data"""
@@ -729,63 +706,6 @@ def plot_model_comparison(samples_flat, samples_curved, data_type="real"):
                    dpi=300, bbox_inches='tight')
     plt.close()
     
-    # Create combined corner plot
-    # First, create comparable arrays by adding a zero curvature column to flat model
-    flat_samples_extended = np.column_stack([
-        samples_flat, 
-        np.zeros(len(samples_flat))  # Add Ok=0 column for flat model
-    ])
-    
-    # Create figure
-    fig = plt.figure(figsize=(12, 12))
-    plt.subplots_adjust(top=0.85)  # Increase space for title
-    
-    # Plot both models in the same corner plot with different colors
-    corner.corner(
-        flat_samples_extended,
-        labels=['H₀', 'Ωₘ', 'Ωₖ'],
-        color='skyblue',
-        plot_datapoints=False,
-        plot_density=False,
-        contours=True,
-        fill_contours=True,
-        levels=[0.68, 0.95, 0.997],
-        label='Flat',
-        title_kwargs={"fontsize": 16},
-        label_kwargs={"fontsize": 14},
-        range=ranges  # Add parameter ranges
-    )
-    
-    corner.corner(
-        samples_curved,
-        labels=['H₀', 'Ωₘ', 'Ωₖ'],
-        color='salmon',
-        plot_datapoints=False,
-        plot_density=False,
-        contours=True,
-        fill_contours=True,
-        levels=[0.68, 0.95, 0.997],
-        label='Curved',
-        fig=fig,
-        title_kwargs={"fontsize": 16},
-        label_kwargs={"fontsize": 14},
-        range=ranges  # Add parameter ranges
-    )
-    
-    plt.suptitle(
-        'Corner Plot Comparison of Flat and Curved ΛCDM Models' +
-        (" (Simulated Data)" if data_type=="fake" else ""),
-        fontsize=16,
-        y=0.95  # Adjust title position
-    )
-    
-    if data_type == "fake":
-        plt.savefig(f'{SBIConfig.PLOT_PATH}sbi_model_comparison_corner_fake.png', 
-                   dpi=300, bbox_inches='tight')
-    else:
-        plt.savefig(f'{SBIConfig.PLOT_PATH}sbi_model_comparison_corner.png', 
-                   dpi=300, bbox_inches='tight')
-    plt.close()
 
 if __name__ == "__main__":
     set_seed(RANDOM_SEED)  # Set seed at start of main
