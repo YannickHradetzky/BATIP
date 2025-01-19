@@ -4,6 +4,8 @@ RANDOM_SEED = 42
 # Set seeds for all random number generators
 import os
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+# increase number of threads for sbi
+os.environ['MKL_NUM_THREADS'] = '10'
 
 import torch
 import numpy as np
@@ -40,7 +42,7 @@ class SBIConfig:
     # SBI settings
     NUM_SIMULATIONS = 10000
     NUM_POSTERIOR_SAMPLES = 1000000  # Increased for better posterior visualization
-    BATCH_SIZE = 128    
+    BATCH_SIZE = 256    
     # Physics constants
     C = 299792.458  # Speed of light in km/s
     
@@ -58,13 +60,13 @@ class SBIConfig:
     # Parameter priors (mean, std)
     PARAM_PRIORS = {
         'flat': {
-            'H0': (70.0, 1.5),  # centered at 70 with std of 2.5
-            'Om': (0.3, 0.05)   # centered at 0.3 with std of 0.05
+            'H0': (70.0, 0.5),  # Tighter constraint around 71
+            'Om': (0.2, 0.03)   # Tighter constraint around 0.3
         },
         'curved': {
-            'H0': (70.0, 1.5),
-            'Om': (0.3, 0.05),  # centered at 0.3 with std of 0.05
-            'Ok': (0.0, 0.05)      # centered at 0 with std of 0.05
+            'H0': (70.0, 0.5),
+            'Om': (0.2, 0.03),
+            'Ok': (0.0, 0.001)  # Much tighter constraint around 0
         }
     }
 
@@ -92,47 +94,56 @@ class CosmologicalSimulator:
             return H0 * torch.sqrt(matter_term + curvature_term + lambda_term)
     
     def luminosity_distance(self, H0, Om, Ok=None):
-        """Compute luminosity distance"""
-        # Create a fine grid for integration starting from MIN_REDSHIFT
+        """
+        Compute luminosity distance with improved precision.
+        Returns tensor of shape (batch_size, n_redshifts)
+        """
+        # Parameter validation
+        if torch.any(Om < 0) or torch.any(Om > 1):
+            return torch.full_like(torch.zeros((len(H0), len(self.z))), float('inf'))
+        if self.model_type == "curved":
+            if torch.any(torch.abs(Ok) > 1) or torch.any((Om + Ok) > 1):
+                return torch.full_like(torch.zeros((len(H0), len(self.z))), float('inf'))
+
+        # Create fine integration grid with more points for higher precision
         z_max = torch.max(self.z)
-        n_points = 1000
+        n_points = 2000  # Increased from 1000 for better precision
         z_grid = torch.linspace(SBIConfig.MIN_REDSHIFT, z_max, n_points)
+
+        # Reshape parameters for broadcasting
+        H0_exp = H0.reshape(-1, 1)
+        Om_exp = Om.reshape(-1, 1)
         
-        # Calculate H(z) on the fine grid for each parameter set
-        H0_expanded = H0.reshape(-1, 1)  # Shape: (batch_size, 1)
-        Om_expanded = Om.reshape(-1, 1)  # Shape: (batch_size, 1)
-        
-        # Calculate integrand on the fine grid
-        matter_term = Om_expanded * (1 + z_grid)**3
+        # Calculate Hubble parameter
+        matter_term = Om_exp * (1 + z_grid)**3
         if self.model_type == "flat":
-            lambda_term = (1 - Om_expanded)
-            Hz = H0_expanded * torch.sqrt(matter_term + lambda_term)
+            Hz = H0_exp * torch.sqrt(matter_term + (1 - Om_exp))
         else:
-            Ok_expanded = Ok.reshape(-1, 1)
-            lambda_term = (1 - Om_expanded - Ok_expanded)
-            curvature_term = Ok_expanded * (1 + z_grid)**2
-            Hz = H0_expanded * torch.sqrt(matter_term + curvature_term + lambda_term)
-            
-        integrand = SBIConfig.C / Hz  # Shape: (batch_size, n_points)
-        
-        # For each redshift in self.z, integrate up to that redshift
-        d_L = torch.zeros((len(H0), len(self.z)))  # Shape: (batch_size, n_redshifts)
-        
+            Ok_exp = Ok.reshape(-1, 1)
+            Hz = H0_exp * torch.sqrt(
+                matter_term + 
+                Ok_exp * (1 + z_grid)**2 + 
+                (1 - Om_exp - Ok_exp)
+            )
+
+        # Compute integrand
+        integrand = SBIConfig.C / Hz
+
+        # Initialize output tensor
+        d_L = torch.zeros((len(H0), len(self.z)))
+
+        # Compute luminosity distance for each redshift
         for i, z in enumerate(self.z):
-            # For each redshift value, create a mask for integration
-            z_val = float(z)  # Convert to float for comparison
-            if z_val >= SBIConfig.MIN_REDSHIFT:  # Only integrate if z >= MIN_REDSHIFT
+            z_val = float(z)
+            if z_val >= SBIConfig.MIN_REDSHIFT:
                 mask = z_grid <= z_val
-                # Integrate up to this redshift for all parameter sets at once
-                chi = torch.trapz(integrand[:, mask], z_grid[mask], dim=1)  # Shape: (batch_size,)
+                chi = torch.trapz(integrand[:, mask], z_grid[mask], dim=1)
                 
                 if self.model_type == "curved":
-                    # Apply curvature correction
-                    Ok_val = Ok.reshape(-1)
-                    chi = apply_curvature_correction(chi, Ok_val)
+                    chi = apply_curvature_correction(chi, Ok.reshape(-1))
                 
                 d_L[:, i] = (1 + z_val) * chi
-        
+
         return d_L
     
     def distance_modulus(self, H0, Om, Ok=None):
@@ -361,22 +372,7 @@ class CosmologySBI:
         self.z_obs = z_obs
         self.mu_obs = mu_obs
         self.mu_err = mu_err
-        
-        # Convert covariance matrix to torch tensor if provided
-        if cov_matrix is not None:
-            self.cov_matrix = torch.tensor(cov_matrix, dtype=torch.float32)
-            # Create likelihood distribution
-            self.likelihood = MultivariateNormal(
-                loc=self.mu_obs,
-                covariance_matrix=self.cov_matrix
-            )
-        else:
-            # Fallback to diagonal covariance matrix using mu_err
-            self.cov_matrix = torch.diag(self.mu_err**2)
-            self.likelihood = MultivariateNormal(
-                loc=self.mu_obs,
-                covariance_matrix=self.cov_matrix
-            )
+        self.cov_matrix = torch.tensor(cov_matrix, dtype=torch.float32)
         
         # Setup simulator with default flat model
         self.simulator = CosmologicalSimulator(z_obs)
@@ -424,7 +420,7 @@ class CosmologySBI:
         theta = self.prior.sample((SBIConfig.NUM_SIMULATIONS,))
         x = self.simulator.simulate(theta, self.cov_matrix)
         plot_training_data(self.z_obs, self.mu_obs, self.mu_err, theta, x[:, :, 1], 
-                          model_type=self.simulator.model_type)
+                           model_type=self.simulator.model_type)
         
         # We only need the distance modulus for training
         x = x[:, :, 1]
@@ -435,14 +431,9 @@ class CosmologySBI:
             theta, x
         ).train(
             training_batch_size=SBIConfig.BATCH_SIZE,
-            retrain_from_scratch=False,
-            discard_prior_samples=False,
-            use_combined_loss=True,  # Better convergence with combined loss
             max_num_epochs=1000,     # Set specific number of epochs
             stop_after_epochs=50,    # Stop if no improvement after 50 epochs
-            show_train_summary=True
         )
-        
         self.posterior = self.posterior_estimator.build_posterior(density_estimator)
     
     def sample_posterior(self, num_samples=None):
@@ -796,7 +787,7 @@ if __name__ == "__main__":
         samples_dict[model_type] = sbi.sample_posterior()
 
         # back test the network
-        # sbi.back_test_network()
+        sbi.back_test_network()
 
         # calculate the autocorrelation
         # plot_autocorrelation(samples_dict[model_type], model_type)
