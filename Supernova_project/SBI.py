@@ -76,10 +76,9 @@ class sbi_model:
     def __init__(self):
         self.model = physics_model()
         self.prior = None
-        self.Ho_bounds = (50, 100)
-        self.Om_bounds = (0, 1)
-        self.Ok_bounds = (-1, 1)
-        self.z_bounds = (0, 2)
+        self.Ho_bounds = (60, 70)
+        self.Om_bounds = (0.1, 0.5)
+        self.Ok_bounds = (-0.1, 0.1)
         self.setup_prior()
         self.z_obs, self.mu_obs, self.mu_err, self.cov_matrix = load_real_data()
         
