@@ -10,6 +10,8 @@ from numpyro.infer import MCMC, NUTS
 from numpyro import sample
 import matplotlib.pyplot as plt
 import corner
+import sympy as sp  
+
 # Configuration
 class Config:
     # MCMC settings
@@ -20,9 +22,9 @@ class Config:
     MAX_TREE_DEPTH = 8
     
     # Priors
-    H0_PRIOR = dist.Normal(70, 5)
-    OM_PRIOR = dist.Normal(0.3, 0.1)
-    OK_PRIOR = dist.Normal(0, 0.1)
+    H0_PRIOR = dist.Normal(70, 1.5)
+    OM_PRIOR = dist.Normal(0.3, 0.05)
+    OK_PRIOR = dist.Normal(0, 0.000001)
     
     # Data filtering
     MIN_REDSHIFT = 0.001
@@ -69,6 +71,41 @@ class CosmologyInference:
         self.mu_obs = self.mu_obs[mask]
         self.mu_err = self.mu_err[mask]
         print("Filtered data points:", len(self.z))
+
+    def setup_taylor_series(self, order=6):
+        """Setup the Taylor series for the curvature correction"""
+        # Define the series expressions but don't expand them yet
+        if self.model_type == "curved":
+            self._f_positive = (1 / sp.sqrt(self.Ok_sym)) * sp.sinh(sp.sqrt(self.Ok_sym) * self.chi_sym)
+            self._f_negative = (1 / sp.sqrt(-self.Ok_sym)) * sp.sin(sp.sqrt(-self.Ok_sym) * self.chi_sym)
+            
+            # Create lambdified functions for fast numerical evaluation
+            self._eval_positive = sp.lambdify((self.Ok_sym, self.chi_sym), 
+                                            self._f_positive.series(self.Ok_sym, 0, order).removeO(),
+                                            modules=['numpy'])
+            self._eval_negative = sp.lambdify((self.Ok_sym, self.chi_sym), 
+                                            self._f_negative.series(self.Ok_sym, 0, order).removeO(),
+                                            modules=['numpy'])
+            
+    def apply_curvature_correction(self, chi, Ok):
+        """
+        Apply curvature correction to chi using direct series evaluation.
+        Args:
+            chi: JAX array of shape (batch_size,)
+            Ok: JAX array of shape (batch_size,)
+        Returns:
+            JAX array of shape (batch_size,)
+        """
+        # Direct calculation without Taylor series
+        # For Ok > 0 (open universe)
+        open_case = (1 / jnp.sqrt(Ok + Config.EPSILON)) * jnp.sinh(jnp.sqrt(Ok + Config.EPSILON) * chi)
+        
+        # For Ok < 0 (closed universe)
+        closed_case = (1 / jnp.sqrt(jnp.abs(Ok) + Config.EPSILON)) * jnp.sin(jnp.sqrt(jnp.abs(Ok)) * chi)
+        
+        # For Ok = 0 (flat universe), just return chi
+        return jnp.where(Ok > 0, open_case,
+                        jnp.where(Ok < 0, closed_case, chi))
     
     @staticmethod
     def _create_cov_mat(cov_data, title):
@@ -112,31 +149,10 @@ class CosmologyInference:
         integrand_values = Config.C / self.hubble_z(h0, Om, Ok, z_array)
         return jax.vmap(lambda z_point: jnp.sum(integrand_values * dz * (z_array <= z_point)))(z)
     
-    def r_exact(self, Ok, chi):
-        """Exact radial distance function"""
-        # Flat universe (Ok = 0)
-        flat_case = chi
-        # Open universe (Ok > 0)
-        open_case = 1/jnp.sqrt(Ok + Config.EPSILON) * jnp.sinh(jnp.sqrt(Ok + Config.EPSILON) * chi)
-        # Closed universe (Ok < 0)
-        closed_case = 1/jnp.sqrt(jnp.abs(Ok) + Config.EPSILON) * jnp.sin(jnp.sqrt(jnp.abs(Ok)) * chi)
-        
-        return jnp.where(Ok == 0, flat_case,
-                        jnp.where(Ok > 0, open_case, closed_case))
-
-    def r_taylor(self, Ok, chi):
-        """Taylor expansion of radial distance around Ok = 0 and differentiate between positive and negative Ok"""      
-        def positive_ok(Ok, chi):
-            return chi/jnp.sqrt(Ok + Config.EPSILON) + (chi**3)/6 * jnp.sqrt(Ok + Config.EPSILON) + 1/120 * (chi**5) * jnp.sqrt(Ok + Config.EPSILON)**3
-        def negative_ok(Ok, chi):
-            return chi/jnp.sqrt(-Ok + Config.EPSILON) - (chi**3)/6 * jnp.sqrt(-Ok + Config.EPSILON) + 1/120 * (chi**5) * jnp.sqrt(-Ok + Config.EPSILON)**3
-        result = jnp.where(Ok > 0, positive_ok(Ok, chi), negative_ok(Ok, chi))
-        return result
-
     def luminosity_distance(self, H0, Om, Ok, z):
         """Luminosity distance using Taylor expansion around Ok = 0"""
         chi_val = self.chi(H0, Om, Ok, z)
-        r_z = jnp.where(jnp.abs(Ok) < Config.EPSILON, chi_val, self.r_taylor(Ok, chi_val))
+        r_z = jnp.where(jnp.abs(Ok) < Config.EPSILON, chi_val, self.apply_curvature_correction(chi_val, Ok))
         return r_z * (1 + z)
 
     def distance_modulus(self, H0, Om, Ok, z):
@@ -240,7 +256,7 @@ class CosmologyInference:
             Ok = np.array(Ok_prior.sample(random.PRNGKey(0), (10000,)))
         else:
             Ok = np.zeros(10000)
-        
+                
         # plot the distance modulus for each combination
         plt.figure(figsize=(10, 8))
         plt.title('Distance Modulus')
@@ -260,17 +276,19 @@ class CosmologyInference:
 if __name__ == "__main__":
     # Initialize the inference object
     cosmo = CosmologyInference()
-    
-    # Run flat model
-    print("Running flat ΛCDM model...")
-    flat_samples = cosmo.run_inference(model_type="flat")
-    cosmo.plot_samples(flat_samples, model_type="flat")
-    
-    # Run curved model
-    print("\nRunning curved ΛCDM model...")
-    curved_samples = cosmo.run_inference(model_type="curved")
-    cosmo.plot_samples(curved_samples, model_type="curved") 
-    
-    # Test model
-    cosmo.test_model(model_type="flat")
     cosmo.test_model(model_type="curved")
+    cosmo.test_model(model_type="flat")
+    
+    # # Run flat model
+    # print("Running flat ΛCDM model...")
+    # flat_samples = cosmo.run_inference(model_type="flat")
+    # cosmo.plot_samples(flat_samples, model_type="flat")
+    
+    # # Run curved model
+    # print("\nRunning curved ΛCDM model...")
+    # curved_samples = cosmo.run_inference(model_type="curved")
+    # cosmo.plot_samples(curved_samples, model_type="curved") 
+    
+    # # Test model
+    # cosmo.test_model(model_type="flat")
+    # cosmo.test_model(model_type="curved")

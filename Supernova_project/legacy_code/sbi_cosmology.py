@@ -66,7 +66,7 @@ class SBIConfig:
         'curved': {
             'H0': (70.0, 0.5),
             'Om': (0.2, 0.03),
-            'Ok': (0.0, 0.001)  # Much tighter constraint around 0
+            'Ok': (0.0, 0.000001)  # Much tighter constraint around 0
         }
     }
 

@@ -6,7 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from torch.distributions import Independent, Uniform
 
-from sbi_cosmology import CosmologySBI, SBIConfig
+from Supernova_project.legacy_code.sbi_cosmology import CosmologySBI, SBIConfig
 
 def test_simulator(min_redshift=0.01):
     # Initialize the SBI setup

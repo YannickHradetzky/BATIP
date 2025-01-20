@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import corner
 from sbi.utils import plot_predictive
 from sbi.analysis import pairplot
-from sbi_cosmology import SBIConfig
+from Supernova_project.legacy_code.sbi_cosmology import SBIConfig
 
 
 def plot_model_comparison(samples_flat, samples_curved, data_type="real"):

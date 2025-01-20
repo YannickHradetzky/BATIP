@@ -1,8 +1,8 @@
 import sympy as sp
 import torch
 from torch.distributions import MultivariateNormal, Independent, Normal
-from SBIConfig import SBIConfig, z_obs, mu_obs, cov_matrix, mu_err
-from SBIConfig import plot_training_data, plot_scientific_results
+from Config import Config, z_obs, mu_obs, cov_matrix, mu_err
+from Config import plot_training_data, plot_scientific_results, plot_model_comparison
 import matplotlib.pyplot as plt
 from sbi import inference
 # set number of cores to use
@@ -20,56 +20,47 @@ class CosmologicalSimulatorInference:
         self.prior = None
         self.setup_prior()
         self.Ok_sym, self.chi_sym = sp.symbols('Ok chi')
-        self.setup_taylor_series(order=4)
+        self.setup_taylor_series(order=8)
         
     def setup_prior(self):
         """Setup the prior distribution for parameters"""
         if self.model_type == "flat":
             self.prior = Independent(
                 Normal(
-                    loc=torch.tensor([SBIConfig.PARAM_PRIORS['flat']['H0'][0],
-                                    SBIConfig.PARAM_PRIORS['flat']['Om'][0]], dtype=torch.float64),
-                    scale=torch.tensor([SBIConfig.PARAM_PRIORS['flat']['H0'][1],
-                                    SBIConfig.PARAM_PRIORS['flat']['Om'][1]], dtype=torch.float64)
+                    loc=torch.tensor([Config.PARAM_PRIORS['flat']['H0'][0],
+                                    Config.PARAM_PRIORS['flat']['Om'][0]], dtype=torch.float64),
+                    scale=torch.tensor([Config.PARAM_PRIORS['flat']['H0'][1],
+                                    Config.PARAM_PRIORS['flat']['Om'][1]], dtype=torch.float64)
                 ),
                 1
             )
         else:
             self.prior = Independent(
                 Normal(
-                    loc=torch.tensor([SBIConfig.PARAM_PRIORS['curved']['H0'][0],
-                                    SBIConfig.PARAM_PRIORS['curved']['Om'][0],
-                                    SBIConfig.PARAM_PRIORS['curved']['Ok'][0]], dtype=torch.float64),
-                    scale=torch.tensor([SBIConfig.PARAM_PRIORS['curved']['H0'][1],
-                                    SBIConfig.PARAM_PRIORS['curved']['Om'][1],
-                                    SBIConfig.PARAM_PRIORS['curved']['Ok'][1]], dtype=torch.float64)
+                    loc=torch.tensor([Config.PARAM_PRIORS['curved']['H0'][0],
+                                    Config.PARAM_PRIORS['curved']['Om'][0],
+                                    Config.PARAM_PRIORS['curved']['Ok'][0]], dtype=torch.float64),
+                    scale=torch.tensor([Config.PARAM_PRIORS['curved']['H0'][1],
+                                    Config.PARAM_PRIORS['curved']['Om'][1],
+                                    Config.PARAM_PRIORS['curved']['Ok'][1]], dtype=torch.float64)
                 ),
                 1
             )
 
     def setup_taylor_series(self, order=6):
         """Setup the Taylor series for the curvature correction"""
-        f_positive = (1 / sp.sqrt(self.Ok_sym)) * sp.sinh(sp.sqrt(self.Ok_sym) * self.chi_sym)
-        f_negative = (1 / sp.sqrt(-self.Ok_sym)) * sp.sin(sp.sqrt(-self.Ok_sym) * self.chi_sym)
-        
+        # Define the series expressions but don't expand them yet
         if self.model_type == "curved":
-            # Compute Taylor series
-            self._taylor_series_negative = sp.series(f_positive, self.Ok_sym, 0, order).removeO()
-            self._taylor_series_positive = sp.series(f_negative, self.Ok_sym, 0, order).removeO()
+            self._f_positive = (1 / sp.sqrt(self.Ok_sym)) * sp.sinh(sp.sqrt(self.Ok_sym) * self.chi_sym)
+            self._f_negative = (1 / sp.sqrt(-self.Ok_sym)) * sp.sin(sp.sqrt(-self.Ok_sym) * self.chi_sym)
             
-            # Convert to polynomial coefficients
-            self._poly_coeffs_pos = {}
-            self._poly_coeffs_neg = {}
-            
-            # Convert positive series
-            poly = sp.Poly(self._taylor_series_positive, self.Ok_sym, self.chi_sym)
-            for powers, coeff in poly.terms():
-                self._poly_coeffs_pos[powers] = float(coeff)
-            
-            # Convert negative series
-            poly = sp.Poly(self._taylor_series_negative, self.Ok_sym, self.chi_sym)
-            for powers, coeff in poly.terms():
-                self._poly_coeffs_neg[powers] = float(coeff)
+            # Create lambdified functions for fast numerical evaluation
+            self._eval_positive = sp.lambdify((self.Ok_sym, self.chi_sym), 
+                                            self._f_positive.series(self.Ok_sym, 0, order).removeO(),
+                                            modules=['numpy'])
+            self._eval_negative = sp.lambdify((self.Ok_sym, self.chi_sym), 
+                                            self._f_negative.series(self.Ok_sym, 0, order).removeO(),
+                                            modules=['numpy'])
 
     def hubble_z(self, H0, Om, Ok=None):
         """Hubble parameter at redshift z"""
@@ -122,7 +113,7 @@ class CosmologicalSimulatorInference:
             print(f"Hz range: {torch.min(Hz).item():.2f} to {torch.max(Hz).item():.2f}")
 
         # Compute integrand
-        integrand = SBIConfig.C / Hz
+        integrand = Config.C / Hz
         
         # Debug integrand values
         if torch.any(torch.isnan(integrand)) or torch.any(torch.isinf(integrand)):
@@ -157,7 +148,7 @@ class CosmologicalSimulatorInference:
     def distance_modulus(self, H0, Om, Ok=None):
         """Compute distance modulus"""
         d_L = self.luminosity_distance(H0, Om, Ok)
-        return 5 * torch.log10(d_L + SBIConfig.EPSILON) + 25
+        return 5 * torch.log10(d_L + Config.EPSILON) + 25
     
     def simulate(self, params, cov_matrix=None):
         """Simulate distance moduli for given parameters"""
@@ -195,44 +186,34 @@ class CosmologicalSimulatorInference:
     
     def apply_curvature_correction(self, chi, Ok):
         """
-        Apply curvature correction to chi using vectorized polynomial evaluation.
+        Apply curvature correction to chi using direct series evaluation.
         Args:
             chi: tensor of shape (batch_size,)
             Ok: tensor of shape (batch_size,)
         Returns:
             tensor of shape (batch_size,)
         """
-        # For extremely small Ok values, return chi to avoid numerical instability
-        small_ok_mask = torch.abs(Ok) < 1e-5
         result = torch.zeros_like(chi)
-        result[small_ok_mask] = chi[small_ok_mask]
         
-        # For remaining values, use Taylor series
-        remaining_mask = ~small_ok_mask
-        if torch.any(remaining_mask):
-            Ok_remaining = Ok[remaining_mask]
-            chi_remaining = chi[remaining_mask]
-            
-            pos_mask = Ok_remaining >= 0
-            neg_mask = ~pos_mask
-            
-            temp_result = torch.zeros_like(chi_remaining)
-            
-            # Evaluate polynomial for positive Ok values
-            if torch.any(pos_mask):
-                for (ok_power, chi_power), coeff in self._poly_coeffs_pos.items():
-                    ok_term = Ok_remaining[pos_mask]**ok_power
-                    chi_term = chi_remaining[pos_mask]**chi_power
-                    temp_result[pos_mask] += coeff * ok_term * chi_term
-            
-            # Evaluate polynomial for negative Ok values
-            if torch.any(neg_mask):
-                for (ok_power, chi_power), coeff in self._poly_coeffs_neg.items():
-                    ok_term = Ok_remaining[neg_mask]**ok_power
-                    chi_term = chi_remaining[neg_mask]**chi_power
-                    temp_result[neg_mask] += coeff * ok_term * chi_term
-            
-            result[remaining_mask] = temp_result
+        # Convert tensors to numpy for sympy evaluation
+        chi_np = chi.numpy()
+        Ok_np = Ok.numpy()
+        
+        # Handle positive Ok values
+        pos_mask = Ok >= 0
+        if torch.any(pos_mask):
+            pos_chi = chi_np[pos_mask]
+            pos_Ok = Ok_np[pos_mask]
+            pos_result = self._eval_positive(pos_Ok, pos_chi)
+            result[pos_mask] = torch.from_numpy(pos_result)
+        
+        # Handle negative Ok values
+        neg_mask = ~pos_mask
+        if torch.any(neg_mask):
+            neg_chi = chi_np[neg_mask]
+            neg_Ok = Ok_np[neg_mask]
+            neg_result = self._eval_negative(neg_Ok, neg_chi)
+            result[neg_mask] = torch.from_numpy(neg_result)
         
         return result
     
@@ -244,19 +225,46 @@ class CosmologicalSimulatorInference:
             show_progress_bars=True,
         )
         
-        # Sample from prior and simulate
-        theta = self.prior.sample((SBIConfig.NUM_SIMULATIONS,))
-        x = self.simulate(theta, self.cov_matrix)
+        # Sample and check Ok distribution (only for curved model)
+        theta = self.prior.sample((Config.NUM_SIMULATIONS,))
+        if self.model_type == "curved":
+            print("\nChecking Ok values:")
+            print(f"Prior Ok range: {theta[:,2].min():.4f} to {theta[:,2].max():.4f}")
+            print(f"Prior Ok mean: {theta[:,2].mean():.4f}")
+            print(f"Number of negative Ok: {(theta[:,2] < 0).sum()}")
+            print(f"Number of positive Ok: {(theta[:,2] > 0).sum()}\n")
+        
+        x = self.simulate(theta, self.cov_matrix) 
         
         # Convert to float32 for SBI
         theta = theta.to(torch.float32)
-        x = x.to(torch.float32)[:,:,1]
+        # ensure that Om is between 0 and 1
+        theta[:,1] = torch.clamp(theta[:,1], 0, 1)
+        if self.model_type == "curved":
+            # ensure that Ok is between -1 and 1
+            theta[:,2] = torch.clamp(theta[:,2], -1, 1)
+            # ensure that H0 is between 50 and 100
+        theta[:,0] = torch.clamp(theta[:,0], 50, 100)
+        x = x.to(torch.float32)[:,:,1]  # Only keep the mu values
 
+        # Remove samples with NaN values and check Ok distribution again
+        nan_mask = torch.isnan(x).any(dim=1)
+        theta = theta[~nan_mask]
+        x = x[~nan_mask]
+
+        if self.model_type == "curved":
+            print("After NaN filtering:")
+            print(f"Ok range: {theta[:,2].min():.4f} to {theta[:,2].max():.4f}")
+            print(f"Ok mean: {theta[:,2].mean():.4f}")
+            print(f"Number of negative Ok: {(theta[:,2] < 0).sum()}")
+            print(f"Number of positive Ok: {(theta[:,2] > 0).sum()}")
+            print(f"Total samples removed: {nan_mask.sum()}\n")
+        
         plot_training_data(self.z_obs, self.mu_obs, self.mu_err, theta, x, model_type=self.model_type)
         
         self.posterior_estimator.append_simulations(theta, x)
         density_estimator = self.posterior_estimator.train(
-            training_batch_size=SBIConfig.BATCH_SIZE,
+            training_batch_size=Config.BATCH_SIZE,
             max_num_epochs=1000,
             stop_after_epochs=50,
         )
@@ -265,7 +273,7 @@ class CosmologicalSimulatorInference:
     def sample_posterior(self, num_samples=None):
         """Sample from the posterior distribution"""
         if num_samples is None:
-            num_samples = SBIConfig.NUM_POSTERIOR_SAMPLES
+            num_samples = Config.NUM_POSTERIOR_SAMPLES
         return self.posterior.sample((num_samples,), x=self.mu_obs)
 
 
@@ -284,5 +292,26 @@ if __name__ == "__main__":
         samples = simulator.sample_posterior()
         samples_dict[model_type] = samples
 
-
     plot_scientific_results(samples_dict["flat"], samples_dict["curved"])
+    plot_model_comparison(samples_dict["flat"], samples_dict["curved"])
+
+    
+    # # draw samples from prior
+    # simulator = CosmologicalSimulatorInference(
+    #     z_obs,
+    #     mu_obs,
+    #     mu_err,
+    #     model_type="curved"
+    # )
+    # samples = simulator.prior.sample((100,))
+    # # simulate data
+    # data = simulator.simulate(samples)[:,:,1]
+    # # plot real data in background
+    # plt.errorbar(z_obs, mu_obs, yerr=mu_err, fmt='r-', label='Real data', zorder=1)
+
+    # # plot simulated data on top
+    # for i in range(len(data)):
+    #     plt.plot(z_obs, data[i], 'b-', alpha=0.5, zorder=2)
+
+    # plt.legend()
+    # plt.show()
