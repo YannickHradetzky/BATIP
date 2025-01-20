@@ -4,9 +4,24 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sbi import inference
 from Config import load_real_data
+from torch.multiprocessing import Pool, set_start_method
+from tqdm import tqdm
 
 # tell torch to use more of my cpu cores
-torch.set_num_threads(5)
+torch.set_num_threads(10)
+
+def _simulate_single(args):
+    """Helper function for parallel processing"""
+    theta_single, z_obs, model = args
+    Ho, Om, Ok = theta_single
+    mu = torch.zeros(len(z_obs))
+    
+    for z_idx, z in enumerate(z_obs):
+        comoving_distance = model.calc_comoving_distance(Ho, Om, Ok, z)
+        luminosity_distance = model.calc_luminosity_distance(comoving_distance, Ok, z)
+        mu[z_idx] = model.calc_apparent_magnitude(luminosity_distance)
+    
+    return mu
 
 class physics_model:
     def __init__(self):
@@ -73,15 +88,15 @@ class physics_model:
 
 
 class sbi_model:
-    def __init__(self):
+    def __init__(self, num_simulations=1000):
         self.model = physics_model()
         self.prior = None
-        self.Ho_bounds = (60, 70)
+        self.Ho_bounds = (60, 80)
         self.Om_bounds = (0.1, 0.5)
         self.Ok_bounds = (-0.1, 0.1)
         self.setup_prior()
         self.z_obs, self.mu_obs, self.mu_err, self.cov_matrix = load_real_data()
-        
+        self.num_simulations = num_simulations
 
     def setup_prior(self):
         self.prior = Independent(Uniform(
@@ -99,29 +114,25 @@ class sbi_model:
         
     def simulator(self, theta):
         """
-        Simulate distance moduli for given parameters
+        Simulate distance moduli for given parameters using parallel processing
         Input: theta shape [N_simulations, 3] (Ho, Om, Ok)
-        Output: mu shape [N_simulations, len(z_obs)]  # One mu value per z_obs for each simulation
+        Output: mu shape [N_simulations, len(z_obs)]
         """
-        # Initialize output tensor
-        mu = torch.zeros((len(theta), len(self.z_obs)))
+        # Create arguments for each simulation
+        args = [(theta[i], self.z_obs, self.model) for i in range(len(theta))]
         
-        # Loop through each parameter set with progress bar
-        from tqdm import tqdm
-        for sim_idx in tqdm(range(len(theta)), desc="Simulating"):
-            Ho = theta[sim_idx, 0]  # Single H0 value
-            Om = theta[sim_idx, 1]  # Single Om value
-            Ok = theta[sim_idx, 2]  # Single Ok value
-            
-            # Calculate for each redshift separately
-            for z_idx, z in enumerate(self.z_obs):
-                comoving_distance = self.model.calc_comoving_distance(Ho, Om, Ok, z)
-                luminosity_distance = self.model.calc_luminosity_distance(comoving_distance, Ok, z)
-                mu[sim_idx, z_idx] = self.model.calc_apparent_magnitude(luminosity_distance)
+        # Use torch multiprocessing to parallelize
+        with Pool() as pool:
+            results = list(tqdm(
+                pool.imap(_simulate_single, args),
+                total=len(theta),
+                desc="Simulating"
+            ))
         
-        return mu  # [N_simulations, len(z_obs)]
+        # Stack results into a single tensor
+        return torch.stack(results)
 
-    def train(self, num_simulations=1000):
+    def train(self):
         """Train the neural posterior estimator"""
         self.posterior_estimator = inference.SNPE(
             prior=self.prior,
@@ -130,7 +141,7 @@ class sbi_model:
         )
         
         # Sample from prior and convert to float32
-        theta = self.prior.sample((num_simulations,)).to(torch.float32)
+        theta = self.prior.sample((self.num_simulations,)).to(torch.float32)
         
         # Simulate and convert to float32
         x = self.simulator(theta)
@@ -141,7 +152,7 @@ class sbi_model:
         density_estimator = self.posterior_estimator.train(
             training_batch_size=50
         )
-        self.posterior = self.posterior_estimator.build_posterior(density_estimator)
+        self.posterior = self.posterior_estimator.build_posterior(density_estimator, sample_with="mcmc")
 
     def sample_posterior(self, num_samples=1000):
         """Sample from the posterior distribution"""
@@ -155,10 +166,10 @@ class sbi_model:
 
 
 if __name__ == "__main__":
-    model = sbi_model()
+    model = sbi_model(num_simulations=10000)
     model.train()
     # Now sample with the actual observed data
-    samples = model.sample_posterior(1000)
+    samples = model.sample_posterior(100000)
     # plot the samples
     Ho = samples[:, 0]
     Om = samples[:, 1]
