@@ -37,8 +37,8 @@ class Config:
     EPSILON = 1e-10
     
     # Paths
-    DATA_PATH = '/Users/Maxi/Desktop/Uni/Master/Cosmos/Prob/Data/'
-    PLOT_PATH = '/Users/Maxi/Desktop/Uni/Master/Cosmos/Prob/Plots/'
+    DATA_PATH = '/Users/Maxi/Desktop/Uni/Master/Cosmos/BATIP/Supernova_project/Data/'
+    PLOT_PATH = '/Users/Maxi/Desktop/Uni/Master/Cosmos/BATIP/Supernova_project/Plots/'
 
 # Set up JAX and NumPyro
 jax.config.update('jax_platform_name', 'cpu')
@@ -389,7 +389,7 @@ class CosmologyInference:
             ax5.legend()
         
         plt.tight_layout()
-        plt.savefig(f'{Config.PLOT_PATH}sbi_training_data_{model_type}.png', 
+        plt.savefig(f'{Config.PLOT_PATH}prob_training_data_{model_type}.png', 
                     dpi=300, bbox_inches='tight')
         plt.close()
     
